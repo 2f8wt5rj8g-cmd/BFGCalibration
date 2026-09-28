@@ -1,8 +1,42 @@
-# 自签与安装
-
-CI 默认产出**未签名**的 `BFGCalibration-unsigned.ipa`。签名有两条路，取决于你有没有付费开发者账号。
+# 构建、自签与安装
 
 ---
+
+## 0. 先解决「没有 Mac 怎么编译」
+
+开发机是 Linux，无法编译 iOS 层。以下是可行路径，按成本排序：
+
+| 方案 | 免费额度 | 超出后单价 | 备注 |
+|---|---|---|---|
+| **GitHub Actions（公开仓库）** | **macOS 分钟无限免费** | — | 非试用额度，长期有效。**首选** |
+| GitHub Actions（私有仓库） | ~200 等效 macOS 分钟/月 | $0.062/min | 公开源码不可接受时用这个 |
+| Codemagic | 500 macOS M2 分钟/月 | $0.095/min | 仅个人账号，不含 Teams |
+| Expo EAS | 15 次 iOS 构建/月 | — | 适合托管式项目，本项目用不上 |
+| MacInCloud / MacStadium 等云 Mac | — | €2.64/24h 起 | 需要交互式 Xcode 时才值得 |
+
+**注意**：macOS runner 的计费倍数约为 Linux 的 10.3 倍。公开仓库不受影响（无限），私有仓库要按此换算免费额度。
+
+本仓库的 `.github/workflows/ios.yml` 已按此配置，推到 GitHub 即可用。
+
+---
+
+## 0.1 装到 iPhone 上需要签名
+
+编译免费，但**安装到真机必须有签名**：
+
+| 路径 | 成本 | 纯 Linux 可用？ |
+|---|---|---|
+| 免费 Apple ID + AltStore/Sideloadly | 免费（证书 7 天） | ❌ 签名工具需 Windows/Mac |
+| **付费开发者账号 + TestFlight** | **$99/年** | ✅ **全程无需 Mac** |
+| 付费开发者账号 + Ad Hoc | $99/年 | 需要 Mac 或 Diawi 类服务 |
+
+纯 Linux 环境下，**TestFlight 是唯一无需 Mac 的安装路径**，这 $99/年 无法绕过。
+
+> 另有 `pymobiledevice3` 等纯 Python 侧载工具方向，涉及 anisette 等环节，**未经验证**，不作为建议。
+
+---
+
+## 1. 路线 A：免费 Apple ID（7 天有效期）
 
 ## 路线 A：免费 Apple ID（7 天有效期）
 
