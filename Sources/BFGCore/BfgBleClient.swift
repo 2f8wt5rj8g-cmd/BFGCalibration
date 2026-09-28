@@ -251,7 +251,7 @@ public final class BfgBleClient: NSObject {
         status("正在扫描车辆蓝牙…")
         // 15 s is generous for a foreground scan; the vehicle advertises
         // continuously once awake.
-        timeout(.scanning, 15, "未扫描到车辆；请唤醒车辆后重试")
+        timeout(.scanning, 10, "未扫描到车辆；请唤醒车辆后重试")
     }
 
     private func finishDiscovery() {
@@ -520,14 +520,22 @@ public final class BfgBleClient: NSObject {
 
         clearTimeout()
         let serial = String(decoding: pairingSerial14, as: UTF8.self)
-        credentialStore.save(serial: serial, password32: pairingPassword32)
+        guard credentialStore.save(serial: serial, password32: pairingPassword32) else {
+            throw NSError(domain: "bfg", code: 11, userInfo: [NSLocalizedDescriptionKey:
+                "车端已确认，但临时密钥建立失败；请重新配对"])
+        }
         result.pairingConfirmed = true
         try crypto.establishSession(password16: Array(pairingPassword32.prefix(16)),
                                     authParam16: pairingChallenge16)
-        status("配对已确认；正在读取…")
-        state = .waitBeforeProfile
-        send(NinebotFrame.readProfile)
-        timeout(.waitBeforeProfile, 5, "读取Profile无回复")
+
+        // The original verifies the vehicle actually stored the new password
+        // before reading anything, by authenticating again under it. Going
+        // straight to a read would only surface a bad credential later, as an
+        // unrelated-looking failure.
+        status("车端已确认；正在验证新配对凭据…")
+        state = .waitAuth
+        send(try NinebotFrame.authenticate(serial14: pairingSerial14))
+        timeout(.waitAuth, 6, "车端已确认，但新凭据认证无回复；请重新连接验证")
     }
 
     // MARK: - Reply handling
@@ -561,7 +569,7 @@ public final class BfgBleClient: NSObject {
             status("认证完成；开始读取车辆参数…")
             state = .waitBeforeProfile
             send(NinebotFrame.readProfile)
-            timeout(.waitBeforeProfile, 5, "读取Profile无回复")
+            timeout(.waitBeforeProfile, 4, "读取Profile无回复")
 
         case .waitBeforeProfile:
             let index = try requireReadAck(plain, src: 0x10, len: 8)
@@ -570,7 +578,7 @@ public final class BfgBleClient: NSObject {
             clearTimeout()
             state = .waitBeforeSoc
             send(NinebotFrame.readSoc)
-            timeout(.waitBeforeSoc, 5, "读取SOC无回复")
+            timeout(.waitBeforeSoc, 4, "读取SOC无回复")
 
         case .waitBeforeSoc:
             let index = try requireReadAck(plain, src: 0x10, len: 8)
@@ -579,7 +587,7 @@ public final class BfgBleClient: NSObject {
             clearTimeout()
             state = .waitBeforeCapacity
             send(NinebotFrame.readCapacity)
-            timeout(.waitBeforeCapacity, 5, "读取容量无回复")
+            timeout(.waitBeforeCapacity, 4, "读取容量无回复")
 
         case .waitBeforeCapacity:
             let index = try requireReadAck(plain, src: 0x10, len: 9)
@@ -778,7 +786,7 @@ public final class BfgBleClient: NSObject {
         // resolves the communication mode that a later write depends on.
         state = .waitDisDashboardVersion
         send(NinebotFrame.readDisDashboardVersion)
-        timeout(.waitDisDashboardVersion, 5, "读取仪表版本无回复")
+        timeout(.waitDisDashboardVersion, 4, "读取仪表版本无回复")
     }
 
     /// Walks the dashboard identification chain in the order the Android client
@@ -788,35 +796,35 @@ public final class BfgBleClient: NSObject {
         case .waitDisDashboardVersion:
             state = .waitDisEnergyWh
             send(NinebotFrame.readDisEnergyWh)
-            timeout(.waitDisEnergyWh, 5, "读取仪表能量无回复")
+            timeout(.waitDisEnergyWh, 4, "读取仪表能量无回复")
         case .waitDisEnergyWh:
             state = .waitDisRemainingCapacity
             send(NinebotFrame.readDisRemainingCapacity)
-            timeout(.waitDisRemainingCapacity, 5, "读取剩余容量无回复")
+            timeout(.waitDisRemainingCapacity, 4, "读取剩余容量无回复")
         case .waitDisRemainingCapacity:
             state = .waitDisBattery
             send(NinebotFrame.readDisBattery)
-            timeout(.waitDisBattery, 5, "读取仪表电量无回复")
+            timeout(.waitDisBattery, 4, "读取仪表电量无回复")
         case .waitDisBattery:
             state = .waitDisVrlaVoltage
             send(NinebotFrame.readDisVrlaVoltage)
-            timeout(.waitDisVrlaVoltage, 5, "读取仪表电压无回复")
+            timeout(.waitDisVrlaVoltage, 4, "读取仪表电压无回复")
         case .waitDisVrlaVoltage:
             state = .waitDisBfgVersion
             send(NinebotFrame.readDisBfgVersion)
-            timeout(.waitDisBfgVersion, 5, "读取计量版本无回复")
+            timeout(.waitDisBfgVersion, 4, "读取计量版本无回复")
         case .waitDisBfgVersion:
             state = .waitColorDisplayVersion
             send(NinebotFrame.readColorDisplayVersion)
-            timeout(.waitColorDisplayVersion, 5, "读取彩屏版本无回复")
+            timeout(.waitColorDisplayVersion, 3, "读取彩屏版本无回复")
         case .waitColorDisplayVersion:
             state = .waitCentreControllerVersion
             send(NinebotFrame.readCentreControllerVersion)
-            timeout(.waitCentreControllerVersion, 5, "读取中控版本无回复")
+            timeout(.waitCentreControllerVersion, 3, "读取中控版本无回复")
         case .waitCentreControllerVersion:
             state = .waitDisConfig
             send(NinebotFrame.readDisConfig)
-            timeout(.waitDisConfig, 5, "读取仪表配置无回复")
+            timeout(.waitDisConfig, 4, "读取仪表配置无回复")
         default:
             break
         }
@@ -1204,7 +1212,7 @@ extension BfgBleClient: BleTransportDelegate {
             return
         }
         transport.connect(identifier: identifier)
-        timeout(.connecting, 10, "连接超时")
+        timeout(.connecting, 12, "连接超时")
     }
 
     public func bleTransport(didDiscover identifier: String, name: String) {
@@ -1216,7 +1224,7 @@ extension BfgBleClient: BleTransportDelegate {
         clearTimeout()
         state = .discovering
         status("已连接；正在发现服务…")
-        timeout(.discovering, 10, "发现服务超时")
+        timeout(.discovering, 6, "发现服务超时")
     }
 
     public func bleTransportDidConnect() {
