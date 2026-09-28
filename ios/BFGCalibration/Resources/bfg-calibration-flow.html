@@ -789,6 +789,17 @@ globalThis.lucide = {createIcons() {
     </div></div>`;
   }
 
+  /// The licence ships as a resource in the app bundle and is handed over by
+  /// the native side, so the text lives in one place rather than two.
+  function licenseModal() {
+    return `<div class="nb-modal-layer" role="dialog" aria-modal="true" aria-label="关于与使用声明"><div class="nb-modal">
+      <div class="nb-modal-icon">${icon('file-text')}</div>
+      <h3>关于与使用声明</h3>
+      <p class="nb-label" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:48vh;overflow-y:auto;text-align:left">${esc(state.licenseText || '未找到使用声明文件。')}</p>
+      <div class="nb-btn-row"><button type="button" class="nb-primary" data-action="close-modal">我知道了</button></div>
+    </div></div>`;
+  }
+
   function missingVehicleModal() {
     return `<div class="nb-modal-layer" role="dialog" aria-modal="true" aria-label="未找到车辆"><div class="nb-modal">
       <div class="nb-modal-icon">${icon('bike')}</div>
@@ -857,6 +868,9 @@ globalThis.lucide = {createIcons() {
       'write-failure': ['circle-x', '写入未完成', state.errorMessage || '请重新读取当前参数，再决定是否重试。', '再次尝试', 'retry-write', '取消', 'close-modal'],
       'verification-incomplete': ['triangle-alert', '二次核对未完成', state.errorMessage || '先重新读取参数，确认前不要重复写入。', '重新核对', 'post-write-reread', '取消', 'close-modal'],
       'restore-unavailable': ['triangle-alert', '暂时无法恢复', state.errorMessage || '请先核对车辆与备份，再重新尝试。', '知道了', 'close-modal', '', ''],
+      'diagnostic-exported': ['circle-check', '诊断已导出', state.errorMessage || '文件已写入本应用的文档目录。', '我知道了', 'close-modal', '', ''],
+      'data-cleared': ['circle-check', '本机数据已清除', state.errorMessage || '配对凭据与备份已删除。', '我知道了', 'close-modal', '', ''],
+      'clear-data-confirm': ['triangle-alert', '清除本机数据？', '将删除本机保存的配对凭据与参数备份。清除后需要重新配对才能使用，且无法找回备份。', '确认清除', 'clear-data-confirmed', '取消', 'close-modal'],
       'scan-unavailable': ['triangle-alert', '扫描未完成', state.errorMessage || '请检查车辆连接后再试。', '我知道了', 'close-modal', '', ''],
       'read-advisory': ['triangle-alert', '读取结果仅供参考', state.errorMessage || '请核对车辆实际配置。', '我知道了', 'close-modal', '', ''],
       'unverified-dis': ['triangle-alert', '仪表配置尚未验证', state.errorMessage || '这组仪表配置尚无实车验证，请确认可以恢复原参数后继续。', '仍要尝试写入', 'confirm-unverified-dis', '取消', 'close-modal']
@@ -893,7 +907,7 @@ globalThis.lucide = {createIcons() {
     else if (state.screen === 'review') html = reviewTemplate();
     else if (state.screen === 'write') html = writeTemplate();
     else html = homeTemplate();
-    screen.innerHTML = `<div class="nb-page-wrap">${html}${state.modal === 'wake' ? wakeModal() : state.modal === 'write-confirm' ? writeConfirmModal() : state.modal === 'write-gate' ? writeGateModal() : state.modal === 'dashboard-requirements' ? dashboardRequirementsModal() : state.modal === 'missing-vehicle' ? missingVehicleModal() : statusModal()}</div>`;
+    screen.innerHTML = `<div class="nb-page-wrap">${html}${state.modal === 'wake' ? wakeModal() : state.modal === 'write-confirm' ? writeConfirmModal() : state.modal === 'write-gate' ? writeGateModal() : state.modal === 'dashboard-requirements' ? dashboardRequirementsModal() : state.modal === 'missing-vehicle' ? missingVehicleModal() : state.modal === 'license' ? licenseModal() : statusModal()}</div>`;
     startGateTimer();
     const modalVisibility = state.modal ? 'open' : 'closed';
     if (modalVisibility !== lastModalVisibility) {
@@ -949,7 +963,9 @@ globalThis.lucide = {createIcons() {
     else if (action === 'vehicles' || action === 'settings') { go(action); }
     else if (action === 'select-vehicle') { state.selectedVehicleIndex = Number(actionEl.dataset.index); if (window.BfgNative) nativeAction('select-vehicle', String(state.selectedVehicleIndex)); go('home'); }
     else if (action === 'refresh-vehicles') { if (window.BfgNative) nativeAction('refresh-vehicles'); }
-    else if (action === 'export-diag' || action === 'show-license' || action === 'clear-data'
+    else if (action === 'clear-data') { state.modal = 'clear-data-confirm'; render(); save(); }
+    else if (action === 'clear-data-confirmed') { state.modal = null; render(); save(); if (window.BfgNative) nativeAction('clear-data'); }
+    else if (action === 'export-diag' || action === 'show-license'
              || action === 'restore-first' || action === 'restore-prewrite') { if (window.BfgNative) nativeAction(action); }
     else if (action === 'scan-dis' || action === 'scan-bfg') { state.scanModule = action === 'scan-dis' ? '仪表盘' : '计量模块'; state.errorMessage = ''; state.scanReplies = 0; state.scanTimeouts = 0; go('scan-progress'); if (window.BfgNative) nativeAction(action); }
     else if (action === 'cancel-scan') { if (window.BfgNative) nativeAction('cancel'); go('settings'); }

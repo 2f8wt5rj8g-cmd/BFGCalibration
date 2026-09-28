@@ -119,6 +119,23 @@ final class BackupStoreTests: XCTestCase {
         XCTAssertEqual(0x31, store.lastConfirmedProfile(serial: serial))
     }
 
+    /// Clearing one vehicle must not disturb another's backups.
+    func testClearRemovesOnlyThatVehicle() {
+        store.saveFirstBackupIfAbsent(serial: serial, profile: 0x31, capacity: 26000)
+        store.savePrewriteSnapshot(serial: serial, profile: 0x21, capacity: 18000,
+                                   disConfigRaw: 0xC2)
+        store.saveLastConfirmed(serial: serial, profile: 0x21)
+        store.saveFirstBackupIfAbsent(serial: "OTHER0000000002", profile: 0x31, capacity: 26000)
+
+        store.clear(serial: serial)
+
+        XCTAssertFalse(store.firstBackup(serial: serial).valid)
+        XCTAssertFalse(store.prewriteBackup(serial: serial).valid)
+        XCTAssertEqual(-1, store.lastConfirmedProfile(serial: serial))
+        XCTAssertEqual(-1, store.disConfigBackup(serial: serial))
+        XCTAssertEqual(0x31, store.firstBackup(serial: "OTHER0000000002").profile)
+    }
+
     func testDescriptionNamesVoltageAndCapacity() {
         store.saveFirstBackupIfAbsent(serial: serial, profile: 0x31, capacity: 26000)
         let text = store.firstBackup(serial: serial).description

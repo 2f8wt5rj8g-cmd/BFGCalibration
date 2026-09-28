@@ -81,6 +81,11 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
         let profile: Int
         /// Wording used by the gate and the result screen.
         let restoreLabel: String?
+        /// The dashboard config the user based this choice on, so a value that
+        /// moved underneath them aborts instead of being overwritten.
+        let expectedDisConfigRaw: Int
+        /// Set once the user accepted an unvalidated dashboard voltage encoding.
+        var allowUnverifiedDis: Bool = false
         /// Gate stage: a dashboard write passes two gates, the meter one.
         var stage: Int = 0
     }
@@ -99,10 +104,16 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
     private weak var webView: WKWebView?
     private var client: BfgBleClient?
     private var pageReady = false
+    /// The operation the live client is running, so its result can be routed.
+    private var activeOperation: BfgBleClient.Operation = .readOnly
+    /// Retained for the diagnostic export; the page only ever shows the last line.
+    private var diagnosticLog: [String] = []
 
     /// Result of the last completed read, which every write is derived from.
     private var lastRead: BfgBleClient.Result?
     private var pendingWrite: PendingWrite?
+    /// A dashboard write parked on the unvalidated-encoding warning.
+    private var pendingUnverified: PendingWrite?
     private var gate: RiskGate?
     private var gateNonce = 0
     /// Meter gates accepted in this session, keyed by serial and target profile,
@@ -159,11 +170,22 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
 
     private func handle(action: String, value: String) {
         switch action {
-        case "begin-pair":
-            pair(value: value)
+        case "pair-scan", "refresh-vehicles":
+            startDiscovery()
 
-        case "begin-connect", "refresh-read":
+        case "begin-pair":
+            pair()
+
+        case "begin-connect", "refresh-read", "post-write-reread":
             refreshRead()
+
+        case "start-repair":
+            pair()
+
+        case "pair-select":
+            // The page mirrors the tapped serial into `vehicleSn`, so the index
+            // itself carries no information the native side needs.
+            break
 
         case "scan-dis", "scan-bfg":
             scan(module: action == "scan-dis" ? RegisterReadPlan.dashboard
@@ -171,6 +193,9 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
 
         case "do-write", "retry-write":
             requestWrite(value: value)
+
+        case "confirm-unverified-dis":
+            confirmUnverifiedDashboardWrite()
 
         case "restore-first":
             requestRestore(first: true)
@@ -194,11 +219,15 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
             pushState()
 
         case "show-license":
-            state["modal"] = ["kind": "license"]
+            state["modal"] = "license"
+            state["licenseText"] = Self.licenseText() ?? "未找到使用声明文件。"
             pushState()
 
         case "export-diag":
             exportDiagnostics()
+
+        case "clear-data":
+            clearLocalData()
 
         case "screen", "modal-state", "select-vehicle", "open-bluetooth-settings":
             // Purely presentational; the page already handled it locally.
@@ -212,14 +241,24 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
         }
     }
 
+    // MARK: - Vehicle discovery
+
+    private func startDiscovery() {
+        state["vehicles"] = []
+        state["pairScanning"] = true
+        pushState()
+        startClient(record: placeholderRecord(serial: ""), operation: .discoverVehicles)
+    }
+
     // MARK: - BLE operations
 
     private var serial: String { state["vehicleSn"] as? String ?? "" }
 
-    private func pair(value: String) {
-        let supplied = value.split(separator: "|").first.map(String.init) ?? ""
+    private func pair() {
         goTo("pair-progress")
-        startClient(record: placeholderRecord(serial: supplied), operation: .pairAndRead)
+        // An empty serial lets the client take the first vehicle that advertises
+        // a valid name; a set one pins the scan to the row the user tapped.
+        startClient(record: placeholderRecord(serial: serial), operation: .pairAndRead)
     }
 
     private func scan(module: Int) {
@@ -259,6 +298,21 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
                     writeFailure("仪表已经是所选电压档位，本次没有发送写入。")
                     return
                 }
+                if DisVoltageConfig.requiresExtraWarning(currentRaw: lastRead.disConfigRaw,
+                                                         targetRaw: target) {
+                    // This encoding family has no in-vehicle validation; the user
+                    // must accept that explicitly before any frame is sent.
+                    pendingUnverified = PendingWrite(isDashboard: true,
+                                                     voltage: request.voltage,
+                                                     capacityMah: request.capacityMah,
+                                                     profile: -1,
+                                                     restoreLabel: nil,
+                                                     expectedDisConfigRaw: lastRead.disConfigRaw)
+                    state["errorMessage"] = "这组仪表配置尚无实车验证，请确认可以恢复原参数后继续。"
+                    state["modal"] = "unverified-dis"
+                    pushState()
+                    return
+                }
             } catch {
                 writeFailure(error.localizedDescription)
                 return
@@ -288,10 +342,26 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
                                     voltage: request.voltage,
                                     capacityMah: request.capacityMah,
                                     profile: profile,
-                                    restoreLabel: nil)
+                                    restoreLabel: nil,
+                                    expectedDisConfigRaw: lastRead.disConfigRaw)
+        beginPreWriteRead()
+    }
+
+    /// The page's "still try" answer to the unvalidated-encoding warning.
+    private func confirmUnverifiedDashboardWrite() {
+        guard var pending = pendingUnverified else { return }
+        pendingUnverified = nil
+        pending.allowUnverifiedDis = true
+        pendingWrite = pending
+        beginPreWriteRead()
+    }
+
+    /// A write may not proceed without a fresh pre-write snapshot, so the read
+    /// happens first and the gate opens only once it has been stored.
+    private func beginPreWriteRead() {
+        state["modal"] = NSNull()
         state["writeStage"] = "precheck"
         pushState()
-        // The pre-write read is what produces the snapshot the gate promises.
         startClient(record: placeholderRecord(serial: serial), operation: .compareRead)
     }
 
@@ -312,18 +382,21 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
                                     voltage: BfgProfileCatalog.nominalVoltage(backup.profile),
                                     capacityMah: backup.capacity,
                                     profile: backup.profile,
-                                    restoreLabel: first ? "首次原参数" : "最近写入前参数")
-        state["writeStage"] = "precheck"
-        pushState()
-        startClient(record: placeholderRecord(serial: serial), operation: .compareRead)
+                                    restoreLabel: first ? "首次原参数" : "最近写入前参数",
+                                    expectedDisConfigRaw: lastRead?.disConfigRaw ?? -1)
+        beginPreWriteRead()
     }
 
     private func startClient(record: DeviceRecord, operation: BfgBleClient.Operation,
-                             targetProfile: Int = -1) {
+                             targetProfile: Int = -1,
+                             expectedDisConfigRaw: Int = -1,
+                             allowUnverifiedDis: Bool = false) {
         client?.cancel()
+        activeOperation = operation
         let newClient = BfgBleClient(record: record, operation: operation,
                                      targetProfile: targetProfile,
-                                     expectedDisConfigRaw: lastRead?.disConfigRaw ?? -1,
+                                     expectedDisConfigRaw: expectedDisConfigRaw,
+                                     allowUnverifiedDis: allowUnverifiedDis,
                                      listener: self)
         client = newClient
         newClient.start()
@@ -341,6 +414,13 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
     /// Opens the next confirmation gate for the pending write.
     private func openGate() {
         guard let pending = pendingWrite else { return }
+        if !pending.isDashboard,
+           approvedMeterGates.contains("\(serial):\(pending.profile)") {
+            // This vehicle and target were already accepted in this session; the
+            // meter warning is asked once per target, not once per write.
+            startWrite(pending)
+            return
+        }
         let seconds: Int
         if pending.isDashboard {
             seconds = pending.stage == 0 ? TimedRiskGate.dashboardSeconds : 0
@@ -386,11 +466,17 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
     }
 
     private func startWrite(_ pending: PendingWrite) {
+        state["writeStage"] = "writing"
+        pushState()
         let record = placeholderRecord(serial: serial)
         if pending.isDashboard {
-            startClient(record: record, operation: .writeDisVoltage, targetProfile: pending.voltage)
+            startClient(record: record, operation: .writeDisVoltage,
+                        targetProfile: pending.voltage,
+                        expectedDisConfigRaw: pending.expectedDisConfigRaw,
+                        allowUnverifiedDis: pending.allowUnverifiedDis)
         } else {
-            startClient(record: record, operation: .writeProfile, targetProfile: pending.profile)
+            startClient(record: record, operation: .writeProfile,
+                        targetProfile: pending.profile)
         }
     }
 
@@ -409,13 +495,97 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
 
     private func exportDiagnostics() {
         // Android wrote a file and shared it through FileProvider. iOS writes to
-        // the container; sharing is left to the system share sheet.
-        let text = "BFG iOS diagnostic\nversion \(state["appVersion"] ?? "")\n"
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("bfg_diagnostic.txt")
-        try? text.write(to: url, atomically: true, encoding: .utf8)
-        state["errorMessage"] = "诊断已导出到 \(url.lastPathComponent)"
+        // the app's Documents directory, which the Files app can reach.
+        let url = Self.documentsDirectory().appendingPathComponent("bfg-diagnostic.txt")
+        let text = diagnosticReport()
+        do {
+            try text.write(to: url, atomically: true, encoding: .utf8)
+            state["errorMessage"] = "\(url.lastPathComponent) · \(text.count) 字节，"
+                + "可在「文件」App 的本应用目录中找到。"
+        } catch {
+            state["errorMessage"] = "诊断导出失败：\(error.localizedDescription)"
+        }
+        state["modal"] = "diagnostic-exported"
         pushState()
+    }
+
+    /// Everything the log had, plus the state a driver-side problem needs:
+    /// which vehicle, what was last read, and which build produced it.
+    private func diagnosticReport() -> String {
+        var lines = [
+            "BFG iOS diagnostic",
+            "time      \(Self.timestamp())",
+            "app       \(state["appVersion"] ?? "?")",
+            "vehicle   \(serial.isEmpty ? "(未连接)" : serial)",
+            "mode      \(state["writeType"] ?? "-")",
+            "supported write=\(state["writeSupported"] ?? "-") "
+                + "dashboard=\(state["dashboardWriteSupported"] ?? "-")",
+            "read      soc=\(state["soc"] ?? "-") voltage=\(state["batteryVoltage"] ?? "-") "
+                + "meter=\(state["meterVoltage"] ?? "-") capacity=\(state["meterCapacity"] ?? "-")",
+            "firmware  meter=\(state["meterFirmware"] ?? "-") dashboard=\(state["dashboardFirmware"] ?? "-") "
+                + "color=\(state["colorDisplayFirmware"] ?? "-") centre=\(state["centreFirmware"] ?? "-")",
+            "scan      replies=\(state["scanReplies"] ?? "-") timeouts=\(state["scanTimeouts"] ?? "-")",
+            "",
+            "--- log (\(diagnosticLog.count) lines) ---"
+        ]
+        lines.append(contentsOf: diagnosticLog)
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    private func clearLocalData() {
+        KeychainCredentialStore.shared.deleteAll()
+        backupStore.clear(serial: serial)
+        lastRead = nil
+        pendingWrite = nil
+        pendingUnverified = nil
+        state["vehicles"] = []
+        state["connected"] = false
+        state["errorMessage"] = "已清除本机保存的配对凭据与备份。再次使用需要重新配对。"
+        state["modal"] = "data-cleared"
+        refreshBackupState(serial: serial)
+        pushState()
+    }
+
+    private static func licenseText() -> String? {
+        guard let url = Bundle.main.url(forResource: "license", withExtension: "txt") else {
+            return nil
+        }
+        return try? String(contentsOf: url, encoding: .utf8)
+    }
+
+    /// Mirrors `BfgProfileCatalog` into the picker's shape. The page holds no
+    /// table of its own, so the options have to come from the same source the
+    /// write itself resolves against — otherwise the user could pick a capacity
+    /// the write path would then reject.
+    private static func capacityOptions() -> (all: [Double], byVoltage: [String: [Double]]) {
+        var byVoltage: [String: [Double]] = [:]
+        var all: [Double] = []
+        for voltage in [48, 60, 72] {
+            let code = BfgProfileCatalog.voltageCode(forVoltage: voltage)
+            var options: [Double] = []
+            for index in 0...0xF {
+                let milliAmpHours = BfgProfileCatalog.expectedCore((index << 4) | code)
+                guard milliAmpHours > 0 else { continue }
+                let ampHours = Double(milliAmpHours) / 1000
+                if !options.contains(ampHours) { options.append(ampHours) }
+            }
+            options.sort()
+            byVoltage[String(voltage)] = options
+            for value in options where !all.contains(value) { all.append(value) }
+        }
+        all.sort()
+        return (all, byVoltage)
+    }
+
+    private static func documentsDirectory() -> URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+    }
+
+    private static func timestamp() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter.string(from: Date())
     }
 
     // MARK: - Payload parsing
@@ -497,6 +667,11 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         pageReady = true
+        // The picker has to be usable before the first read, so the options are
+        // seeded from the profile table rather than waiting for a connection.
+        let options = Self.capacityOptions()
+        state["availableCapacities"] = options.all
+        state["capacityByVoltage"] = options.byVoltage
         pushState()
     }
 
@@ -518,29 +693,66 @@ extension PrototypeCoordinator: BfgBleClient.Listener {
     func bleClient(didLog line: String) {
         // Surfaced through the page's log area when present.
         state["logLine"] = line
+        // Bounded so a long session cannot grow without limit; the tail is the
+        // part that matters when something went wrong.
+        diagnosticLog.append(line)
+        if diagnosticLog.count > 500 {
+            diagnosticLog.removeFirst(diagnosticLog.count - 500)
+        }
     }
 
     func bleClient(didFinish result: BfgBleClient.Result) {
+        state["pairScanning"] = false
+
+        if activeOperation == .discoverVehicles {
+            state["vehicles"] = result.discoveredVehicles.map {
+                ["sn": $0.serial, "detail": "点击选择这台车"]
+            }
+            state["busyMessage"] = NSNull()
+            pushState()
+            goTo("pair-list")
+            return
+        }
+
         lastRead = result
         state["connected"] = true
         state["vehicleSn"] = result.serial
-        state["soc"] = result.displaySoc
-        state["batteryVoltage"] = result.dashboardNominalVoltage
-        state["meterVoltage"] = result.meterNominalVoltage
-        state["dashboardVoltage"] = result.dashboardNominalVoltage
-        state["meterCapacity"] = result.displayBeforeCapacity
-        state["dashboardCapacity"] = result.disRemainingCapacity
-        state["meterFirmware"] = result.meterFirmware
-        state["dashboardFirmware"] = result.dashboardFirmware
-        state["colorDisplayFirmware"] = result.colorDisplayVersion
-        state["centreFirmware"] = result.centreControllerVersion
-        state["writeSupported"] = result.writeSupported
-        state["dashboardWriteSupported"] = DashboardWritePolicy.allows(
-            dashboard: result.dashboardFirmware,
-            colorDisplay: result.colorDisplayVersion,
-            centre: result.centreControllerVersion,
-            meter: result.meterFirmware)
-        state["writeType"] = CommunicationModeResolver.label(result.mode)
+        // The page prints these verbatim, so they are formatted the same way the
+        // Android client formatted them rather than passed through as raw values.
+        state["soc"] = DisplayFormatter.soc(result.displaySoc)
+        state["batteryVoltage"] = DisplayFormatter.batteryVoltage(result.disVrlaVoltage)
+        state["meterVoltage"] = DisplayFormatter.voltageName(result.profileRaw)
+        state["dashboardVoltage"] = DisplayFormatter.nominalVoltage(result.dashboardNominalVoltage)
+        state["meterCapacity"] = DisplayFormatter.capacityShort(result.displayBeforeCapacity)
+        state["dashboardCapacity"] = DisplayFormatter.capacityShort(result.disRemainingCapacity)
+        state["remainingCapacity"] = DisplayFormatter.capacityShort(result.disRemainingCapacity)
+        state["meterFirmware"] = DisplayFormatter.firmwareVersion(result.meterFirmware)
+        state["dashboardFirmware"] = DisplayFormatter.firmwareVersion(result.dashboardFirmware)
+        state["colorDisplayFirmware"] = DisplayFormatter.firmwareVersion(result.colorDisplayVersion)
+        state["centreFirmware"] = DisplayFormatter.firmwareVersion(result.centreControllerVersion)
+
+        // A read-only serial is refused by the client as well; mirroring it here
+        // keeps the page from offering a write that would only fail later.
+        let readOnly = WriteAccessPolicy.isReadOnlySerial(result.serial)
+        state["readOnlyVehicle"] = readOnly
+        state["writeSupported"] = result.writeSupported && !readOnly
+        state["dashboardWriteSupported"] = !readOnly
+            && DashboardWritePolicy.allows(dashboard: result.dashboardFirmware,
+                                           colorDisplay: result.colorDisplayVersion,
+                                           centre: result.centreControllerVersion,
+                                           meter: result.meterFirmware)
+            && DisVoltageConfig.nominalVoltage(result.disConfigRaw) > 0
+
+        // The capacity picker has no table of its own on the page; the options
+        // come from the same profile table the write resolves against.
+        let options = Self.capacityOptions()
+        state["availableCapacities"] = options.all
+        state["capacityByVoltage"] = options.byVoltage
+        if result.profileRaw >= 0 {
+            state["voltage"] = BfgProfileCatalog.nominalVoltage(result.profileRaw)
+            state["capacity"] = Double(BfgProfileCatalog.expectedCore(result.profileRaw)) / 1000
+        }
+
         state["scanReplies"] = result.registerScanReplies
         state["scanTimeouts"] = result.registerScanTimeouts
         state["busyMessage"] = NSNull()

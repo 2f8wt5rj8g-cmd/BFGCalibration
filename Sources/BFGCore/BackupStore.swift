@@ -173,6 +173,20 @@ public final class BackupStore {
         return first.profile != recent.profile || first.capacity != recent.capacity
     }
 
+    /// Drops every entry belonging to one vehicle. Used when the user clears
+    /// local data: leaving a backup behind would keep offering a restore for a
+    /// vehicle whose credentials are gone.
+    public func clear(serial: String) {
+        let suffixes = [Suffix.profile, Suffix.capacity, Suffix.time,
+                        Suffix.prewriteProfile, Suffix.prewriteCapacity, Suffix.prewriteTime,
+                        Suffix.prewriteDis92, Suffix.dis92Original,
+                        Suffix.lastConfirmedProfile, Suffix.lastConfirmedTime]
+        for suffix in suffixes {
+            guard let key = key(serial, suffix) else { continue }
+            defaults.removeObject(forKey: key)
+        }
+    }
+
     // MARK: - Primitives
 
     private func intValue(_ serial: String, _ suffix: String) -> Int {

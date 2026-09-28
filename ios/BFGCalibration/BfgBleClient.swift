@@ -24,6 +24,9 @@ final class BfgBleClient: NSObject {
         case writeDisVoltage
         case pairAndRead
         case registerScan
+        /// Collects nearby vehicles for the user to confirm before pairing,
+        /// rather than connecting to the first match.
+        case discoverVehicles
     }
 
     protocol Listener: AnyObject {
@@ -55,6 +58,12 @@ final class BfgBleClient: NSObject {
         var profileReadbackVerified = false
         var mode: CommunicationModeResolver.Mode = .unsupported
         var writeSupported = false
+        struct DiscoveredVehicle {
+            let serial: String
+            let identifier: String
+        }
+
+        var discoveredVehicles: [DiscoveredVehicle] = []
         var scannedCapacity = -1
         var scannedCapacityRegister = -1
         var capacityScanReason = ""
@@ -157,6 +166,12 @@ final class BfgBleClient: NSObject {
     private var timeoutWork: DispatchWorkItem?
     private let queue = DispatchQueue(label: "com.bfgtools.calibration.client")
 
+    /// How long the vehicle list scans before reporting what it found.
+    private static let discoveryWindow: Double = 8
+    /// Vehicles seen during a `.discoverVehicles` scan, de-duplicated by the
+    /// peripheral identifier iOS assigns.
+    private var discoveredVehicles: [(serial: String, identifier: String)] = []
+
     /// Serial broadcast in the advertised name, learned during the scan.
     private var discoveredSerial = ""
     /// Set when `start()` ran before CoreBluetooth reported its state.
@@ -209,11 +224,32 @@ final class BfgBleClient: NSObject {
 
     private func beginScan() {
         state = .scanning
-        status("正在扫描车辆蓝牙…")
         transport.startScan()
+        if operation == .discoverVehicles {
+            status("正在搜索附近车辆…")
+            // Running the window out is a normal outcome here, not a failure:
+            // "nothing found" is still an answer the page can show.
+            let item = DispatchWorkItem { [weak self] in
+                guard let self, !self.finished, self.state == .scanning else { return }
+                self.finishDiscovery()
+            }
+            timeoutWork = item
+            queue.asyncAfter(deadline: .now() + Self.discoveryWindow, execute: item)
+            return
+        }
+        status("正在扫描车辆蓝牙…")
         // 15 s is generous for a foreground scan; the vehicle advertises
         // continuously once awake.
         timeout(.scanning, 15, "未扫描到车辆；请唤醒车辆后重试")
+    }
+
+    private func finishDiscovery() {
+        result.discoveredVehicles = discoveredVehicles.map {
+            Result.DiscoveredVehicle(serial: $0.serial, identifier: $0.identifier)
+        }
+        finish(discoveredVehicles.isEmpty
+               ? "未搜索到车辆；请唤醒车辆后重试。"
+               : "已找到 \(discoveredVehicles.count) 台车辆。")
     }
 
     func cancel() {
@@ -1053,6 +1089,17 @@ extension BfgBleClient: BleTransportDelegate {
     func bleTransport(didDiscover peripheral: CBPeripheral, name: String) {
         guard !finished, state == .scanning else { return }
         guard let serial = BfgBleClient.serialFromName(name) else { return }
+
+        if operation == .discoverVehicles {
+            // Pairing overwrites the vehicle's only key slot, so the user
+            // confirms which vehicle to pair from this list.
+            let identifier = peripheral.identifier.uuidString
+            if !discoveredVehicles.contains(where: { $0.identifier == identifier }) {
+                discoveredVehicles.append((serial, identifier))
+                status("已找到 \(discoveredVehicles.count) 台车辆…")
+            }
+            return
+        }
 
         if !record.effectiveSn.isEmpty,
            record.effectiveSn.caseInsensitiveCompare(serial) != .orderedSame {
