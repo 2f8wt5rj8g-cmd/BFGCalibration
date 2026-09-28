@@ -89,6 +89,14 @@ public final class BfgBleClient: NSObject {
             if resolvedBeforeCapacityRaw >= 0 { return resolvedBeforeCapacityRaw }
             return mode == .unsupported ? -1 : bfgCapacity
         }
+        /// Counterpart of `displayBeforeCapacity` for a completed write: the
+        /// value the vehicle reported back, or nothing when the combination was
+        /// unsupported and no trustworthy reading exists.
+        public var displayAfterCapacity: Int {
+            if resolvedAfterCapacityRaw >= 0 { return resolvedAfterCapacityRaw }
+            return mode == .unsupported ? -1 : afterCapacityRaw
+        }
+
         public var displaySoc: Int { resolvedBeforeSoc >= 0 ? resolvedBeforeSoc : bfgSoc }
 
         public var meterNominalVoltage: Int {

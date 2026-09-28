@@ -114,6 +114,19 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
     private var pendingWrite: PendingWrite?
     /// A dashboard write parked on the unvalidated-encoding warning.
     private var pendingUnverified: PendingWrite?
+
+    /// The delayed re-read the original runs after a confirmed write.
+    ///
+    /// A write's own read-back proves the value landed; the vehicle can still be
+    /// catching up on the remaining capacity, so the value is read again a few
+    /// seconds later rather than trusted immediately.
+    private struct PostWriteCheck {
+        let expectedProfile: Int
+        let expectedDisConfig: Int
+        var attempts: Int = 0
+    }
+    private var postWriteCheck: PostWriteCheck?
+    private var postWriteTimer: DispatchWorkItem?
     private var gate: RiskGate?
     private var gateNonce = 0
     /// Meter gates accepted in this session, keyed by serial and target profile,
@@ -423,6 +436,19 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
             startWrite(pending)
             return
         }
+        if !pending.isDashboard {
+            // The meter dialog is only worth showing if the snapshot it
+            // promises can actually be read back.
+            let snapshot = backupStore.prewriteBackup(serial: serial)
+            guard snapshot.valid,
+                  snapshot.profile == lastRead?.profileRaw,
+                  snapshot.capacity == lastRead?.displayBeforeCapacity else {
+                writeFailure("本次写入前备份未能核实，没有发送写入指令。"
+                    + "请重新连接并读取车辆。")
+                return
+            }
+        }
+
         let seconds: Int
         if pending.isDashboard {
             seconds = pending.stage == 0 ? TimedRiskGate.dashboardSeconds : 0
@@ -716,6 +742,13 @@ extension PrototypeCoordinator: BfgBleClient.Listener {
             return
         }
 
+        // Post-write re-check: a plain read whose result decides whether the
+        // vehicle has settled or needs reading again.
+        if postWriteCheck != nil, pendingWrite == nil, !result.writeCommandSent {
+            handlePostWriteCheck(result)
+            return
+        }
+
         lastRead = result
         state["connected"] = true
         state["vehicleSn"] = result.serial
@@ -725,7 +758,11 @@ extension PrototypeCoordinator: BfgBleClient.Listener {
         state["batteryVoltage"] = DisplayFormatter.batteryVoltage(result.disVrlaVoltage)
         state["meterVoltage"] = DisplayFormatter.voltageName(result.profileRaw)
         state["dashboardVoltage"] = DisplayFormatter.nominalVoltage(result.dashboardNominalVoltage)
-        state["meterCapacity"] = DisplayFormatter.capacityShort(result.displayBeforeCapacity)
+        // After a write the meaningful figures are the post-write ones; showing
+        // the pre-write values would make a successful write look like a no-op.
+        let wrote = result.writeCommandSent
+        state["meterCapacity"] = DisplayFormatter.capacityShort(
+            wrote ? result.displayAfterCapacity : result.displayBeforeCapacity)
         state["dashboardCapacity"] = DisplayFormatter.capacityShort(result.disRemainingCapacity)
         state["remainingCapacity"] = DisplayFormatter.capacityShort(result.disRemainingCapacity)
         state["meterFirmware"] = DisplayFormatter.firmwareVersion(result.meterFirmware)
@@ -750,9 +787,10 @@ extension PrototypeCoordinator: BfgBleClient.Listener {
         let options = Self.capacityOptions()
         state["availableCapacities"] = options.all
         state["capacityByVoltage"] = options.byVoltage
-        if result.profileRaw >= 0 {
-            state["voltage"] = BfgProfileCatalog.nominalVoltage(result.profileRaw)
-            state["capacity"] = Double(BfgProfileCatalog.expectedCore(result.profileRaw)) / 1000
+        let shownProfile = wrote && result.afterProfile >= 0 ? result.afterProfile : result.profileRaw
+        if shownProfile >= 0 {
+            state["voltage"] = BfgProfileCatalog.nominalVoltage(shownProfile)
+            state["capacity"] = Double(BfgProfileCatalog.expectedCore(shownProfile)) / 1000
         }
 
         state["scanReplies"] = result.registerScanReplies
@@ -767,6 +805,36 @@ extension PrototypeCoordinator: BfgBleClient.Listener {
         // A completed write ends the flow; a read that ran only to produce the
         // pre-write snapshot hands over to the risk gate instead.
         if pendingWrite != nil, !result.writeCommandSent {
+            guard let pending = pendingWrite else { return }
+
+            // The dashboard config the user confirmed against must still be the
+            // one on the vehicle; anything else means the basis of the choice
+            // has moved, so nothing is sent.
+            if pending.isDashboard, pending.expectedDisConfigRaw >= 0,
+               result.disConfigRaw != pending.expectedDisConfigRaw {
+                writeFailure("写入前发现仪表配置已变化，本次没有发送写入指令。"
+                    + "请重新核对当前参数后再试。")
+                return
+            }
+
+            // Nothing may be written unless the values that would be needed to
+            // get back are actually present.
+            let backupReady = pending.isDashboard
+                ? (result.disConfigRaw >= 0
+                    && DisVoltageConfig.nominalVoltage(result.disConfigRaw) > 0
+                    && DashboardWritePolicy.allows(dashboard: result.dashboardFirmware,
+                                                   colorDisplay: result.colorDisplayVersion,
+                                                   centre: result.centreControllerVersion,
+                                                   meter: result.meterFirmware))
+                : (result.profileRaw >= 0
+                    && result.displayBeforeCapacity > 0
+                    && result.writeSupported)
+            guard backupReady else {
+                writeFailure("写入前未能完整读取并保存原参数，本次没有发送写入指令。"
+                    + "请保持车辆开机后重试。")
+                return
+            }
+
             guard backupStore.savePrewriteSnapshot(serial: result.serial,
                                                    profile: result.profileRaw,
                                                    capacity: result.displayBeforeCapacity,
@@ -782,12 +850,85 @@ extension PrototypeCoordinator: BfgBleClient.Listener {
         }
 
         pendingWrite = nil
+        pendingUnverified = nil
         pushState()
-        if result.writeCommandSent {
-            goTo("post-write-check")
-        } else {
+
+        guard result.writeCommandSent else {
             goTo("home")
+            return
         }
+        guard result.profileReadbackVerified || result.disConfigReadbackVerified else {
+            goTo("post-write-check")
+            return
+        }
+
+        // The write's own read-back confirmed the value; the original still
+        // waits and reads again, because a vehicle can lag on the remaining
+        // capacity even after the profile has changed.
+        postWriteCheck = PostWriteCheck(expectedProfile: result.afterProfile,
+                                        expectedDisConfig: result.disConfigAfterRaw)
+        goTo("post-write-check")
+        schedulePostWriteRead(after: 5)
+    }
+
+    /// Decides whether the delayed read settled the write, needs another, or
+    /// contradicts it. Reads only — a failed check never retries the write.
+    private func handlePostWriteCheck(_ result: BfgBleClient.Result) {
+        guard var check = postWriteCheck else { return }
+        check.attempts += 1
+        postWriteCheck = check
+
+        lastRead = result
+        state["vehicleSn"] = result.serial
+        state["busyMessage"] = NSNull()
+        refreshBackupState(serial: result.serial)
+
+        let matches = PostWriteCheckPolicy.targetMatches(
+            actualProfile: result.profileRaw,
+            expectedProfile: check.expectedProfile,
+            actualDisRaw: result.disConfigRaw,
+            expectedDisRaw: check.expectedDisConfig)
+        let pending = PostWriteCheckPolicy.capacityPending(
+            soc: result.displaySoc,
+            remainingCapacityRaw: result.disRemainingCapacity)
+
+        if PostWriteCheckPolicy.shouldRetry(readsCompleted: check.attempts,
+                                            targetMatches: matches,
+                                            capacityPending: pending) {
+            goTo("post-write-check")
+            schedulePostWriteRead(after: 3)
+            return
+        }
+
+        postWriteCheck = nil
+        guard matches else {
+            writeFailure("二次核对后，车辆返回的档位仍与目标不一致。"
+                + "本次写入未确认成功；请核对当前参数后再尝试。")
+            return
+        }
+        if check.expectedProfile >= 0 {
+            backupStore.saveLastConfirmed(serial: result.serial,
+                                          profile: check.expectedProfile)
+        }
+        refreshBackupState(serial: result.serial)
+        state["result"] = "success"
+        state["modal"] = "write-success"
+        state["errorMessage"] = pending
+            ? "目标档位已回读确认。剩余容量暂未更新，请稍后重新读取。"
+            : "二次核对完成，车辆已返回目标档位和最新剩余容量。"
+        state["busyMessage"] = NSNull()
+        pushState()
+    }
+
+    private func schedulePostWriteRead(after seconds: Double) {
+        postWriteTimer?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self, self.postWriteCheck != nil else { return }
+            self.startClient(record: self.placeholderRecord(serial: self.serial),
+                             operation: .compareRead)
+        }
+        postWriteTimer = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: item)
     }
 
     func bleClient(didFailWith message: String) {
