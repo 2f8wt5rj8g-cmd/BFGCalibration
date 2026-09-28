@@ -1,23 +1,21 @@
 import Foundation
-import CoreBluetooth
-import Security
-import BFGCore
 
-/// CoreBluetooth port of the Android `BfgBleClient`.
+/// Port of the Android `BfgBleClient`.
 ///
 /// The protocol layer — frame format, Encryption2, the state sequence, retry
-/// and timeout policy — is byte-identical to Android and lives in `BFGCore`,
-/// where it is covered by tests that run on Linux. This file supplies only the
-/// transport and drives the state machine.
+/// and timeout policy — is byte-identical to Android. The transport and the
+/// credential store are injected (see `BleTransport` and `CredentialStore`), so
+/// this state machine runs unchanged against CoreBluetooth on device and
+/// against a simulated vehicle under `swift test`.
 ///
 /// Credential source differs by design: Android read the official Ninebot
 /// app's database (via root or a virtualised container). iOS reads the Keychain
 /// entry written by this app's own pairing flow. See `KeychainCredentialStore`.
-final class BfgBleClient: NSObject {
+public final class BfgBleClient: NSObject {
 
     // MARK: - Public surface
 
-    enum Operation {
+    public enum Operation {
         case readOnly
         case compareRead
         case writeProfile
@@ -29,74 +27,74 @@ final class BfgBleClient: NSObject {
         case discoverVehicles
     }
 
-    protocol Listener: AnyObject {
+    public protocol Listener: AnyObject {
         func bleClient(didUpdateStatus status: String)
         func bleClient(didLog line: String)
         func bleClient(didFinish result: Result)
         func bleClient(didFailWith message: String)
     }
 
-    final class Result {
-        var serial = ""
-        var profileRaw = -1
-        var bfgSoc = -1
-        var bfgCapacity = -1
-        var disBatterySoc = -1
-        var disEnergyWh = -1
-        var disRemainingCapacity = -1
-        var disVrlaVoltage = -1
-        var disBfgVersion = -1
-        var disDashboardVersion = -1
-        var colorDisplayVersion = -1
-        var centreControllerVersion = -1
-        var disConfigRaw = -1
-        var dashboardFirmware = -1
-        var meterFirmware = -1
-        var pairingConfirmed = false
-        var writeCommandSent = false
-        var disConfigReadbackVerified = false
-        var profileReadbackVerified = false
-        var mode: CommunicationModeResolver.Mode = .unsupported
-        var writeSupported = false
-        struct DiscoveredVehicle {
-            let serial: String
-            let identifier: String
+    public final class Result {
+        public var serial = ""
+        public var profileRaw = -1
+        public var bfgSoc = -1
+        public var bfgCapacity = -1
+        public var disBatterySoc = -1
+        public var disEnergyWh = -1
+        public var disRemainingCapacity = -1
+        public var disVrlaVoltage = -1
+        public var disBfgVersion = -1
+        public var disDashboardVersion = -1
+        public var colorDisplayVersion = -1
+        public var centreControllerVersion = -1
+        public var disConfigRaw = -1
+        public var dashboardFirmware = -1
+        public var meterFirmware = -1
+        public var pairingConfirmed = false
+        public var writeCommandSent = false
+        public var disConfigReadbackVerified = false
+        public var profileReadbackVerified = false
+        public var mode: CommunicationModeResolver.Mode = .unsupported
+        public var writeSupported = false
+        public struct DiscoveredVehicle {
+            public let serial: String
+            public let identifier: String
         }
 
-        var discoveredVehicles: [DiscoveredVehicle] = []
-        var scannedCapacity = -1
-        var scannedCapacityRegister = -1
-        var capacityScanReason = ""
-        var registerScanReplies = 0
-        var registerScanTimeouts = 0
-        var registerScanModule = -1
+        public var discoveredVehicles: [DiscoveredVehicle] = []
+        public var scannedCapacity = -1
+        public var scannedCapacityRegister = -1
+        public var capacityScanReason = ""
+        public var registerScanReplies = 0
+        public var registerScanTimeouts = 0
+        public var registerScanModule = -1
 
         // Write path, mirroring the Android `Result` fields of the same role.
-        var writeAckSeen = false
-        var writeAckFrame = ""
-        var afterProfile = -1
-        var afterCapacityRaw = -1
-        var capacityReadbackVerified = false
-        var verificationRetried = false
-        var disConfigTargetRaw = -1
-        var disConfigAfterRaw = -1
-        var resolvedBeforeSoc = -1
-        var resolvedBeforeCapacityRaw = -1
-        var resolvedAfterCapacityRaw = -1
+        public var writeAckSeen = false
+        public var writeAckFrame = ""
+        public var afterProfile = -1
+        public var afterCapacityRaw = -1
+        public var capacityReadbackVerified = false
+        public var verificationRetried = false
+        public var disConfigTargetRaw = -1
+        public var disConfigAfterRaw = -1
+        public var resolvedBeforeSoc = -1
+        public var resolvedBeforeCapacityRaw = -1
+        public var resolvedAfterCapacityRaw = -1
 
         /// Android substitutes the scanned capacity for the raw 0x1C reading when
         /// the vehicle only resolved in compatibility mode. An unsupported
         /// combination reports no capacity rather than a misleading raw value.
-        var displayBeforeCapacity: Int {
+        public var displayBeforeCapacity: Int {
             if resolvedBeforeCapacityRaw >= 0 { return resolvedBeforeCapacityRaw }
             return mode == .unsupported ? -1 : bfgCapacity
         }
-        var displaySoc: Int { resolvedBeforeSoc >= 0 ? resolvedBeforeSoc : bfgSoc }
+        public var displaySoc: Int { resolvedBeforeSoc >= 0 ? resolvedBeforeSoc : bfgSoc }
 
-        var meterNominalVoltage: Int {
+        public var meterNominalVoltage: Int {
             profileRaw < 0 ? -1 : BfgProfileCatalog.nominalVoltage(profileRaw)
         }
-        var dashboardNominalVoltage: Int {
+        public var dashboardNominalVoltage: Int {
             let configured = DisVoltageConfig.nominalVoltage(disConfigRaw)
             return configured >= 0 ? configured : DashboardVoltageResolver
                 .resolve(energyWh: disEnergyWh, remainingCapacityMah: disRemainingCapacity)
@@ -125,7 +123,8 @@ final class BfgBleClient: NSObject {
     private let record: DeviceRecord
     private let result = Result()
 
-    private let transport = BleTransport()
+    private let transport: BleTransport
+    private let credentialStore: CredentialStore
     private var crypto: Encryption2?
     private var state: State = .idle
     private var finished = false
@@ -163,6 +162,10 @@ final class BfgBleClient: NSObject {
     /// Set once the user accepted an unvalidated dashboard voltage encoding.
     private let allowUnverifiedDis: Bool
 
+    /// Identifies the client's own queue, so a callback that already runs on it
+    /// is not dispatched onto itself.
+    private static let queueKey = DispatchSpecificKey<UInt8>()
+
     private var timeoutWork: DispatchWorkItem?
     private let queue = DispatchQueue(label: "com.bfgtools.calibration.client")
 
@@ -177,22 +180,26 @@ final class BfgBleClient: NSObject {
     /// Set when `start()` ran before CoreBluetooth reported its state.
     private var awaitingCentralState = false
 
-    init(record: DeviceRecord, operation: Operation, targetProfile: Int = -1,
+    public init(record: DeviceRecord, operation: Operation, targetProfile: Int = -1,
          expectedDisConfigRaw: Int = -1, allowUnverifiedDis: Bool = false,
+         transport: BleTransport, credentialStore: CredentialStore,
          listener: Listener) {
         self.record = record
         self.operation = operation
         self.targetProfile = targetProfile
         self.expectedDisConfigRaw = expectedDisConfigRaw
         self.allowUnverifiedDis = allowUnverifiedDis
+        self.transport = transport
+        self.credentialStore = credentialStore
         self.listener = listener
         super.init()
+        queue.setSpecific(key: BfgBleClient.queueKey, value: 1)
         transport.delegate = self
     }
 
     // MARK: - Lifecycle
 
-    func start() {
+    public func start() {
         do {
             if WriteAccessPolicy.isReadOnlySerial(record.effectiveSn), operation != .readOnly,
                operation != .compareRead, operation != .registerScan {
@@ -204,8 +211,12 @@ final class BfgBleClient: NSObject {
             // ignores any stored key and negotiates a fresh one.
             let stored = operation == .pairAndRead
                 ? nil
-                : KeychainCredentialStore.shared.load(serial: record.effectiveSn)
-            password16 = stored ?? record.passwordCopy()
+                : credentialStore.load(serial: record.effectiveSn)
+            // The store keeps the full 32-byte pairing password; the session key
+            // is derived from its first half only. The original truncates here
+            // with `Arrays.copyOf(locallyPaired, 16)`; passing all 32 through
+            // makes every non-pairing session fail with an invalid key length.
+            password16 = stored.map { Array($0.prefix(16)) } ?? record.passwordCopy()
 
             // CBCentralManager starts in `.unknown` and only reports
             // `.poweredOn` asynchronously. Treating that initial state as
@@ -252,7 +263,7 @@ final class BfgBleClient: NSObject {
                : "已找到 \(discoveredVehicles.count) 台车辆。")
     }
 
-    func cancel() {
+    public func cancel() {
         finishNow()
     }
 
@@ -286,10 +297,71 @@ final class BfgBleClient: NSObject {
         timeoutWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self, !self.finished, self.state == expected else { return }
-            self.fail(message)
+            self.handleTimeout(expected, message)
         }
         timeoutWork = work
         queue.asyncAfter(deadline: .now() + seconds, execute: work)
+    }
+
+    /// Decides what a silent register means.
+    ///
+    /// Most registers are optional: the original keeps walking the chain and
+    /// lets the communication-mode resolver weigh whatever did arrive. Only the
+    /// states with nothing to fall back on end the run — which is why one
+    /// unanswered address must not abort an entire read.
+    private func handleTimeout(_ expected: State, _ message: String) {
+        switch expected {
+        case .waitDisDashboardVersion, .waitDisEnergyWh, .waitDisRemainingCapacity,
+             .waitDisBattery, .waitDisVrlaVoltage, .waitDisBfgVersion,
+             .waitColorDisplayVersion, .waitCentreControllerVersion:
+            log("识别阶段某寄存器无回复；继续后续读取。")
+            advanceDisChain()
+
+        case .waitDisConfig:
+            // A dashboard write cannot go ahead without knowing the current
+            // value; every other operation carries on with what it has.
+            if operation == .writeDisVoltage {
+                fail("仪表配置未读取到，本次没有发送写入。")
+            } else {
+                log("仪表配置无回复；使用已有读数继续。")
+                afterDisConfigRead()
+            }
+
+        case .waitCapacityCompatScan:
+            capacityScanValues[capacityScanRegisterIndex][capacityScanRepeatIndex] = -1
+            log("兼容容量地址无回复；继续扫描。")
+            advanceCapacityCompatibilityScan()
+
+        case .waitDisAfter where result.writeCommandSent:
+            if disVerifyAttempts < NinebotFrame.maxDisVerifyAttempts {
+                result.verificationRetried = true
+                retryDisVerificationSafely()
+            } else {
+                fail("仪表写入指令已发送，但多次回读无回复；请重新连接读取当前配置。")
+            }
+
+        case .waitAfterProfile where result.writeCommandSent
+            && profileVerifyAttempts < NinebotFrame.maxProfileVerifyAttempts:
+            result.verificationRetried = true
+            retryProfileVerificationSafely()
+
+        case .waitAfterCapacity where result.profileReadbackVerified:
+            if capacityVerifyAttempts < NinebotFrame.maxCapacityVerifyAttempts {
+                result.verificationRetried = true
+                status("Profile已确认；再次读取容量参数"
+                    + "（\(capacityVerifyAttempts + 1)/\(NinebotFrame.maxCapacityVerifyAttempts)）…")
+                requestCapacityVerification()
+            } else {
+                finish("Profile已回读确认；容量参数多次无响应，按Profile确认写入成功。")
+            }
+
+        case .waitAfterProfile where result.writeCommandSent:
+            fail("写入指令已发送，但连续\(profileVerifyAttempts)次未收到Profile回读，"
+                + "暂时无法完成回读确认；这不代表写入失败，请重新连接读取当前参数。")
+
+        default:
+            fail(message)
+        }
     }
 
     private func clearTimeout() { timeoutWork?.cancel() }
@@ -448,7 +520,7 @@ final class BfgBleClient: NSObject {
 
         clearTimeout()
         let serial = String(decoding: pairingSerial14, as: UTF8.self)
-        KeychainCredentialStore.shared.save(serial: serial, password32: pairingPassword32)
+        credentialStore.save(serial: serial, password32: pairingPassword32)
         result.pairingConfirmed = true
         try crypto.establishSession(password16: Array(pairingPassword32.prefix(16)),
                                     authParam16: pairingChallenge16)
@@ -492,7 +564,7 @@ final class BfgBleClient: NSObject {
             timeout(.waitBeforeProfile, 5, "读取Profile无回复")
 
         case .waitBeforeProfile:
-            let index = try requireHeader(plain, src: 0x10, dst: 0x3E, cmd: 0x01, len: 8)
+            let index = try requireReadAck(plain, src: 0x10, len: 8)
             guard index == 0x00, plain.count >= 8 else { return }
             result.profileRaw = Int(plain[7])
             clearTimeout()
@@ -501,7 +573,7 @@ final class BfgBleClient: NSObject {
             timeout(.waitBeforeSoc, 5, "读取SOC无回复")
 
         case .waitBeforeSoc:
-            let index = try requireHeader(plain, src: 0x10, dst: 0x3E, cmd: 0x01, len: 8)
+            let index = try requireReadAck(plain, src: 0x10, len: 8)
             guard index == 0x02, plain.count >= 8 else { return }
             result.bfgSoc = Int(plain[7])
             clearTimeout()
@@ -510,14 +582,14 @@ final class BfgBleClient: NSObject {
             timeout(.waitBeforeCapacity, 5, "读取容量无回复")
 
         case .waitBeforeCapacity:
-            let index = try requireHeader(plain, src: 0x10, dst: 0x3E, cmd: 0x01, len: 9)
+            let index = try requireReadAck(plain, src: 0x10, len: 9)
             guard index == 0x1C, plain.count >= 9 else { return }
             result.bfgCapacity = NinebotFrame.readLe16(plain, offset: 7)
             clearTimeout()
             try continueAfterCapacityRead()
 
         case .waitDisDashboardVersion:
-            let index = try requireHeader(plain, src: 0x01, dst: 0x3E, cmd: 0x01, len: 9)
+            let index = try requireReadAck(plain, src: 0x01, len: 9)
             guard index == 0x1A, plain.count >= 9 else { return }
             result.dashboardFirmware = NinebotFrame.readLe16(plain, offset: 7)
             result.disDashboardVersion = result.dashboardFirmware
@@ -525,56 +597,56 @@ final class BfgBleClient: NSObject {
             advanceDisChain()
 
         case .waitDisEnergyWh:
-            let index = try requireHeader(plain, src: 0x01, dst: 0x3E, cmd: 0x01, len: 9)
+            let index = try requireReadAck(plain, src: 0x01, len: 9)
             guard index == 0x1E, plain.count >= 9 else { return }
             result.disEnergyWh = NinebotFrame.readLe16(plain, offset: 7)
             clearTimeout()
             advanceDisChain()
 
         case .waitDisRemainingCapacity:
-            let index = try requireHeader(plain, src: 0x01, dst: 0x3E, cmd: 0x01, len: 9)
+            let index = try requireReadAck(plain, src: 0x01, len: 9)
             guard index == 0x44, plain.count >= 9 else { return }
             result.disRemainingCapacity = NinebotFrame.readLe16(plain, offset: 7)
             clearTimeout()
             advanceDisChain()
 
         case .waitDisBattery:
-            let index = try requireHeader(plain, src: 0x01, dst: 0x3E, cmd: 0x01, len: 8)
-            guard index == 0xB5, plain.count >= 8 else { return }
-            result.disBatterySoc = Int(plain[7])
+            let index = try requireReadAck(plain, src: 0x01, len: 9)
+            guard index == 0xB5, plain.count >= 9 else { return }
+            result.disBatterySoc = NinebotFrame.readLe16(plain, offset: 7)
             clearTimeout()
             advanceDisChain()
 
         case .waitDisVrlaVoltage:
-            let index = try requireHeader(plain, src: 0x01, dst: 0x3E, cmd: 0x01, len: 9)
+            let index = try requireReadAck(plain, src: 0x01, len: 9)
             guard index == 0xB1, plain.count >= 9 else { return }
             result.disVrlaVoltage = NinebotFrame.readLe16(plain, offset: 7)
             clearTimeout()
             advanceDisChain()
 
         case .waitDisBfgVersion:
-            let index = try requireHeader(plain, src: 0x01, dst: 0x3E, cmd: 0x01, len: 9)
+            let index = try requireReadAck(plain, src: 0x01, len: 9)
             guard index == 0x3D, plain.count >= 9 else { return }
             result.meterFirmware = NinebotFrame.readLe16(plain, offset: 7)
             clearTimeout()
             advanceDisChain()
 
         case .waitColorDisplayVersion:
-            let index = try requireHeader(plain, src: 0x01, dst: 0x3E, cmd: 0x01, len: 9)
+            let index = try requireReadAck(plain, src: 0x01, len: 9)
             guard index == 0xD1, plain.count >= 9 else { return }
             result.colorDisplayVersion = NinebotFrame.readLe16(plain, offset: 7)
             clearTimeout()
             advanceDisChain()
 
         case .waitCentreControllerVersion:
-            let index = try requireHeader(plain, src: 0x09, dst: 0x3E, cmd: 0x01, len: 9)
+            let index = try requireReadAck(plain, src: 0x09, len: 9)
             guard index == 0x02, plain.count >= 9 else { return }
             result.centreControllerVersion = NinebotFrame.readLe16(plain, offset: 7)
             clearTimeout()
             advanceDisChain()
 
         case .waitDisConfig:
-            let index = try requireHeader(plain, src: 0x01, dst: 0x3E, cmd: 0x01, len: 9)
+            let index = try requireReadAck(plain, src: 0x01, len: 9)
             guard index == 0x92, plain.count >= 9 else { return }
             result.disConfigRaw = NinebotFrame.readLe16(plain, offset: 7)
             clearTimeout()
@@ -582,7 +654,7 @@ final class BfgBleClient: NSObject {
 
         case .waitCapacityCompatScan:
             let register = CapacityCompatibilityResolver.registers[capacityScanRegisterIndex]
-            let index = try requireHeader(plain, src: 0x10, dst: 0x3E, cmd: 0x01, len: 9)
+            let index = try requireReadAck(plain, src: 0x10, len: 9)
             guard index == register, plain.count >= 9 else { return }
             let value = NinebotFrame.readLe16(plain, offset: 7)
             capacityScanValues[capacityScanRegisterIndex][capacityScanRepeatIndex] = value
@@ -602,7 +674,7 @@ final class BfgBleClient: NSObject {
             scheduleVerifySoon()
 
         case .waitAfterProfile:
-            let index = try requireHeader(plain, src: 0x10, dst: 0x3E, cmd: 0x01, len: 8)
+            let index = try requireReadAck(plain, src: 0x10, len: 8)
             guard index == 0x00, plain.count >= 8 else { return }
             result.afterProfile = Int(plain[7])
             clearTimeout()
@@ -635,7 +707,7 @@ final class BfgBleClient: NSObject {
             requestCapacityVerification()
 
         case .waitAfterCapacity:
-            let index = try requireHeader(plain, src: 0x10, dst: 0x3E, cmd: 0x01, len: 9)
+            let index = try requireReadAck(plain, src: 0x10, len: 9)
             guard index == 0x1C, plain.count >= 9 else { return }
             result.afterCapacityRaw = NinebotFrame.readLe16(plain, offset: 7)
             result.capacityReadbackVerified = true
@@ -651,7 +723,7 @@ final class BfgBleClient: NSObject {
             scheduleVerify(after: 0.7) { [weak self] in self?.verifyAfterDisWriteSafely() }
 
         case .waitDisAfter:
-            let index = try requireHeader(plain, src: 0x01, dst: 0x3E, cmd: 0x01, len: 9)
+            let index = try requireReadAck(plain, src: 0x01, len: 9)
             guard index == 0x92, plain.count >= 9 else { return }
             result.disConfigAfterRaw = NinebotFrame.readLe16(plain, offset: 7)
             clearTimeout()
@@ -668,8 +740,7 @@ final class BfgBleClient: NSObject {
         case .waitRegisterScan:
             let length = try RegisterReadPlan.length(module: registerScanModule,
                                                      index: registerScanIndex)
-            let index = try requireHeader(plain, src: registerScanModule, dst: 0x3E,
-                                          cmd: 0x01, len: 7 + length)
+            let index = try requireReadAck(plain, src: registerScanModule, len: 7 + length)
             guard index == registerScanIndex else { return }
             result.registerScanReplies += 1
             log(String(format: "REGISTER_READ module=0x%02X index=0x%02X length=%d",
@@ -682,12 +753,17 @@ final class BfgBleClient: NSObject {
         }
     }
 
-    /// Validates the reply header and returns its index byte, so the caller can
-    /// confirm it is looking at the reply it asked for.
+    /// Validates a read acknowledgement and returns its index byte.
+    ///
+    /// Port of Android's `isReadAckFrom(p, src, index, dataLen)`: a read reply
+    /// always carries CMD 0x04 and echoes the requested register in its index
+    /// byte. The reply's CMD is fixed here rather than passed in, because
+    /// passing the *request's* CMD (0x01) made every reply fail to match — the
+    /// whole read chain was dead and no test reached it.
     @discardableResult
-    private func requireHeader(_ plain: [UInt8], src: Int, dst: Int, cmd: Int,
-                               len: Int) throws -> Int {
-        guard NinebotFrame.isFrame(plain, src: src, dst: dst, cmd: cmd), plain.count >= len else {
+    private func requireReadAck(_ plain: [UInt8], src: Int, len: Int) throws -> Int {
+        guard NinebotFrame.isFrame(plain, src: src, dst: 0x3E, cmd: 0x04),
+              plain.count >= len else {
             throw NSError(domain: "bfg", code: 9, userInfo: [NSLocalizedDescriptionKey:
                 "回包格式不符"])
         }
@@ -697,12 +773,9 @@ final class BfgBleClient: NSObject {
     // MARK: - Read chain and write decision
 
     private func continueAfterCapacityRead() throws {
-        // A read-only run stops here; the remaining registers exist to
-        // identify the dashboard firmware before allowing a write.
-        if operation == .readOnly || operation == .compareRead {
-            finish("读取完成")
-            return
-        }
+        // The dashboard chain runs for every operation, read-only included: it
+        // is what yields the dashboard voltage and firmware set, and what
+        // resolves the communication mode that a later write depends on.
         state = .waitDisDashboardVersion
         send(NinebotFrame.readDisDashboardVersion)
         timeout(.waitDisDashboardVersion, 5, "读取仪表版本无回复")
@@ -1050,6 +1123,20 @@ final class BfgBleClient: NSObject {
 
     // MARK: - Helpers
 
+    /// Funnels every transport callback onto the client's own queue.
+    ///
+    /// The central delivers on its own queue while the timeout timers fire on
+    /// this one, and the state machine is not otherwise thread-safe. On device
+    /// this was a latent race; under the simulator's faster turnaround it is
+    /// routinely reachable.
+    private func onQueue(_ work: @escaping @Sendable () -> Void) {
+        if DispatchQueue.getSpecific(key: BfgBleClient.queueKey) != nil {
+            work()
+        } else {
+            queue.async(execute: work)
+        }
+    }
+
     private func wipePassword() {
         for i in 0..<password16.count { password16[i] = 0 }
     }
@@ -1062,18 +1149,15 @@ final class BfgBleClient: NSObject {
     }
 
     private static func randomBytes(_ count: Int) -> [UInt8] {
-        var bytes = [UInt8](repeating: 0, count: count)
-        // SecRandomCopyBytes is the platform CSPRNG; the Android code used
-        // SecureRandom with the same intent.
-        _ = SecRandomCopyBytes(kSecRandomDefault, count, &bytes)
-        return bytes
+        // Android used SecureRandom with the same intent: the platform CSPRNG.
+        SecureRandom.bytes(count)
     }
 }
 
 // MARK: - Transport delegate
 
 extension BfgBleClient: BleTransportDelegate {
-    func bleTransportDidUpdateState(poweredOn: Bool) {
+    private func handleCentralState(_ poweredOn: Bool) {
         guard !finished else { return }
         if poweredOn {
             if awaitingCentralState {
@@ -1086,14 +1170,17 @@ extension BfgBleClient: BleTransportDelegate {
         }
     }
 
-    func bleTransport(didDiscover peripheral: CBPeripheral, name: String) {
+    public func bleTransportDidUpdateState(poweredOn: Bool) {
+        onQueue { [weak self] in self?.handleCentralState(poweredOn) }
+    }
+
+    private func handleDiscover(_ identifier: String, _ name: String) {
         guard !finished, state == .scanning else { return }
         guard let serial = BfgBleClient.serialFromName(name) else { return }
 
         if operation == .discoverVehicles {
             // Pairing overwrites the vehicle's only key slot, so the user
             // confirms which vehicle to pair from this list.
-            let identifier = peripheral.identifier.uuidString
             if !discoveredVehicles.contains(where: { $0.identifier == identifier }) {
                 discoveredVehicles.append((serial, identifier))
                 status("已找到 \(discoveredVehicles.count) 台车辆…")
@@ -1116,11 +1203,15 @@ extension BfgBleClient: BleTransportDelegate {
             fail("加密初始化失败")
             return
         }
-        transport.connect(peripheral)
+        transport.connect(identifier: identifier)
         timeout(.connecting, 10, "连接超时")
     }
 
-    func bleTransport(didConnect peripheral: CBPeripheral) {
+    public func bleTransport(didDiscover identifier: String, name: String) {
+        onQueue { [weak self] in self?.handleDiscover(identifier, name) }
+    }
+
+    private func handleConnect() {
         guard !finished else { return }
         clearTimeout()
         state = .discovering
@@ -1128,13 +1219,21 @@ extension BfgBleClient: BleTransportDelegate {
         timeout(.discovering, 10, "发现服务超时")
     }
 
-    func bleTransport(didDisconnect error: Error?) {
+    public func bleTransportDidConnect() {
+        onQueue { [weak self] in self?.handleConnect() }
+    }
+
+    private func handleDisconnect(_ error: Error?) {
         guard !finished else { return }
         if handlePostWriteConnectionLoss() { return }
         fail("连接已断开" + (error.map { "：\($0.localizedDescription)" } ?? ""))
     }
 
-    func bleTransport(didDiscoverServices error: Error?) {
+    public func bleTransport(didDisconnect error: Error?) {
+        onQueue { [weak self] in self?.handleDisconnect(error) }
+    }
+
+    private func handleDiscoverServices(_ error: Error?) {
         guard !finished else { return }
         guard error == nil else {
             fail("发现服务失败：\(describe(error!))")
@@ -1146,7 +1245,11 @@ extension BfgBleClient: BleTransportDelegate {
         timeout(.subscribing, 5, "开启通知超时")
     }
 
-    func bleTransport(didUpdateNotificationState error: Error?) {
+    public func bleTransport(didDiscoverServices error: Error?) {
+        onQueue { [weak self] in self?.handleDiscoverServices(error) }
+    }
+
+    private func handleNotificationState(_ error: Error?) {
         guard !finished, state == .subscribing else { return }
         guard error == nil else {
             fail("开启Notify失败")
@@ -1169,11 +1272,19 @@ extension BfgBleClient: BleTransportDelegate {
         }
     }
 
-    func bleTransport(didReceive data: Data) {
+    public func bleTransport(didUpdateNotificationState error: Error?) {
+        onQueue { [weak self] in self?.handleNotificationState(error) }
+    }
+
+    private func handleReceive(_ data: Data) {
         handleNotify([UInt8](data))
     }
 
-    func bleTransport(didWrite error: Error?) {
+    public func bleTransport(didReceive data: Data) {
+        onQueue { [weak self] in self?.handleReceive(data) }
+    }
+
+    private func handleWriteResult(_ error: Error?) {
         guard error == nil else {
             fail("写入特征失败：\(describe(error!))")
             return
@@ -1183,6 +1294,10 @@ extension BfgBleClient: BleTransportDelegate {
             // the value, so nothing is finished here.
             log("写入已发送，等待车辆回执")
         }
+    }
+
+    public func bleTransport(didWrite error: Error?) {
+        onQueue { [weak self] in self?.handleWriteResult(error) }
     }
 
     /// The vehicle advertises its 14-character serial as the BLE local name.

@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import BFGCore
 
 /// Persistent pairing credentials, backed by the iOS Keychain.
 ///
@@ -19,7 +20,7 @@ import Security
 ///
 /// Keys are stored `WhenUnlockedThisDeviceOnly` so they are never copied into
 /// an iCloud or iTunes backup.
-public final class KeychainCredentialStore {
+public final class KeychainCredentialStore: CredentialStore {
     public static let shared = KeychainCredentialStore()
 
     private let service = "com.bfgtools.calibration.pairing"

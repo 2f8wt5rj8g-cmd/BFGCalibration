@@ -1,5 +1,6 @@
 import Foundation
 import CoreBluetooth
+import BFGCore
 
 /// Thin CoreBluetooth wrapper for the Ninebot Legacy UART service.
 ///
@@ -17,7 +18,9 @@ import CoreBluetooth
 ///   * Scanning is unfiltered because the vehicle does not advertise the UART
 ///     service UUID. The OS throttles scans in the background, so pairing is
 ///     expected to happen in the foreground.
-final class BleTransport: NSObject {
+/// CoreBluetooth conformer to `BFGCore.BleTransport`, so the state machine
+/// can be driven by a simulated vehicle in tests.
+final class CoreBluetoothTransport: NSObject, BFGCore.BleTransport {
     static let serviceUUID = CBUUID(string: "6e400001-b5a3-f393-e0a9-e50e24dcca9e")
     static let txUUID = CBUUID(string: "6e400002-b5a3-f393-e0a9-e50e24dcca9e")
     static let rxUUID = CBUUID(string: "6e400003-b5a3-f393-e0a9-e50e24dcca9e")
@@ -26,6 +29,9 @@ final class BleTransport: NSObject {
 
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
+    /// Scan results are keyed by identifier: the client only ever knows the
+    /// opaque identity string, never the CBPeripheral itself.
+    private var scanned: [String: CBPeripheral] = [:]
     private var txCharacteristic: CBCharacteristic?
 
     private let queue = DispatchQueue(label: "com.bfgtools.calibration.ble")
@@ -54,7 +60,8 @@ final class BleTransport: NSObject {
         central.stopScan()
     }
 
-    func connect(_ peripheral: CBPeripheral) {
+    func connect(identifier: String) {
+        guard let peripheral = scanned[identifier] else { return }
         self.peripheral = peripheral
         peripheral.delegate = self
         central.connect(peripheral, options: nil)
@@ -84,18 +91,7 @@ final class BleTransport: NSObject {
     }
 }
 
-protocol BleTransportDelegate: AnyObject {
-    func bleTransportDidUpdateState(poweredOn: Bool)
-    func bleTransport(didDiscover peripheral: CBPeripheral, name: String)
-    func bleTransport(didConnect peripheral: CBPeripheral)
-    func bleTransport(didDisconnect error: Error?)
-    func bleTransport(didDiscoverServices error: Error?)
-    func bleTransport(didUpdateNotificationState error: Error?)
-    func bleTransport(didReceive data: Data)
-    func bleTransport(didWrite error: Error?)
-}
-
-extension BleTransport: CBCentralManagerDelegate {
+extension CoreBluetoothTransport: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         delegate?.bleTransportDidUpdateState(poweredOn: central.state == .poweredOn)
     }
@@ -107,12 +103,13 @@ extension BleTransport: CBCentralManagerDelegate {
         let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
             ?? peripheral.name
             ?? ""
-        delegate?.bleTransport(didDiscover: peripheral, name: name)
+        scanned[peripheral.identifier.uuidString] = peripheral
+        delegate?.bleTransport(didDiscover: peripheral.identifier.uuidString, name: name)
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        delegate?.bleTransport(didConnect: peripheral)
-        peripheral.discoverServices([BleTransport.serviceUUID])
+        delegate?.bleTransportDidConnect()
+        peripheral.discoverServices([CoreBluetoothTransport.serviceUUID])
     }
 
     func centralManager(_ central: CBCentralManager,
@@ -127,18 +124,18 @@ extension BleTransport: CBCentralManagerDelegate {
     }
 }
 
-extension BleTransport: CBPeripheralDelegate {
+extension CoreBluetoothTransport: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         guard error == nil else {
             delegate?.bleTransport(didDiscoverServices: error)
             return
         }
-        guard let service = peripheral.services?.first(where: { $0.uuid == BleTransport.serviceUUID })
+        guard let service = peripheral.services?.first(where: { $0.uuid == CoreBluetoothTransport.serviceUUID })
         else {
             delegate?.bleTransport(didDiscoverServices: BleError.serviceNotFound)
             return
         }
-        peripheral.discoverCharacteristics([BleTransport.txUUID, BleTransport.rxUUID], for: service)
+        peripheral.discoverCharacteristics([CoreBluetoothTransport.txUUID, CoreBluetoothTransport.rxUUID], for: service)
     }
 
     func peripheral(_ peripheral: CBPeripheral,
@@ -147,8 +144,8 @@ extension BleTransport: CBPeripheralDelegate {
             delegate?.bleTransport(didDiscoverServices: error)
             return
         }
-        guard let tx = service.characteristics?.first(where: { $0.uuid == BleTransport.txUUID }),
-              let rx = service.characteristics?.first(where: { $0.uuid == BleTransport.rxUUID })
+        guard let tx = service.characteristics?.first(where: { $0.uuid == CoreBluetoothTransport.txUUID }),
+              let rx = service.characteristics?.first(where: { $0.uuid == CoreBluetoothTransport.rxUUID })
         else {
             delegate?.bleTransport(didDiscoverServices: BleError.characteristicNotFound)
             return
@@ -175,22 +172,3 @@ extension BleTransport: CBPeripheralDelegate {
     }
 }
 
-enum BleError: Error, LocalizedError {
-    case serviceNotFound
-    case characteristicNotFound
-    case bluetoothOff
-    case txNotReady
-    case deviceNotFound
-    case timeout(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .serviceNotFound: return "没有找到九号 Legacy UART Service"
-        case .characteristicNotFound: return "缺少 0002/0003 特征"
-        case .bluetoothOff: return "系统蓝牙未开启"
-        case .txNotReady: return "GATT TX未就绪"
-        case .deviceNotFound: return "未扫描到该车辆"
-        case .timeout(let what): return "\(what)"
-        }
-    }
-}

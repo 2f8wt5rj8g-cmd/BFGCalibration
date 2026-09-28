@@ -32,6 +32,12 @@ jobs:
       - name: Run BFGCore tests
         run: swift test
 
+      # Drives the real client state machine against the simulated vehicle:
+      # pairing, the full read chain, and write-then-read-back including the
+      # degraded cases (lost ACK, lazily persisted value, silent registers).
+      - name: Run simulated-vehicle end-to-end demo
+        run: swift run bfgdemo
+
   build-ios:
     name: Build iOS app
     runs-on: macos-14

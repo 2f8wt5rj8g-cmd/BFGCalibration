@@ -397,6 +397,8 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
                                      targetProfile: targetProfile,
                                      expectedDisConfigRaw: expectedDisConfigRaw,
                                      allowUnverifiedDis: allowUnverifiedDis,
+                                     transport: CoreBluetoothTransport(),
+                                     credentialStore: KeychainCredentialStore.shared,
                                      listener: self)
         client = newClient
         newClient.start()
