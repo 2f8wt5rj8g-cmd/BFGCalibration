@@ -1,0 +1,147 @@
+name: iOS
+
+# Build and verify the iOS port on a real macOS runner.
+#
+# Why this exists: the development machine is Linux, which cannot compile or
+# run anything that imports CoreBluetooth, UIKit, WebKit or Security. GitHub's
+# macOS runners can. That makes CI the verification environment for every layer
+# the Linux box cannot reach, rather than a convenience extra.
+#
+# Two jobs, deliberately separate:
+#   core-tests — the portable BFGCore package, also verifiable on Linux
+#   build-ios  — the app target, only compilable on macOS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  core-tests:
+    name: Core tests (portable)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: swift --version
+
+      # Same suite that passes on Linux, re-run here to catch any
+      # platform-specific divergence in Foundation or XCTest.
+      - name: Run BFGCore tests
+        run: swift test
+
+  build-ios:
+    name: Build iOS app
+    runs-on: macos-14
+    needs: core-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec ios/project.yml
+
+      # Unsigned build. This is the artefact to hand to a local signing tool
+      # when no signing secrets are configured.
+      - name: Build (unsigned)
+        run: |
+          xcodebuild \
+            -project ios/BFGCalibration.xcodeproj \
+            -scheme BFGCalibration \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned app
+        run: |
+          mkdir -p out/Payload
+          cp -R build/Build/Products/Release-iphoneos/BFGCalibration.app out/Payload/
+          cd out && zip -qry BFGCalibration-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BFGCalibration-unsigned-ipa
+          path: out/BFGCalibration-unsigned.ipa
+
+      # Optional signed build.
+      #
+      # Skipped unless the repository defines the signing secrets below, so a
+      # fork or a clone without credentials still produces the unsigned IPA.
+      # See docs/IOS_SIGNING.md for how to produce each value.
+      #   BUILD_CERTIFICATE_BASE64      — .p12, base64-encoded
+      #   P12_PASSWORD                  — password for that .p12
+      #   BUILD_PROVISION_PROFILE_BASE64— .mobileprovision, base64-encoded
+      #   KEYCHAIN_PASSWORD             — any temporary password
+      #   APPLE_TEAM_ID                 — 10-character team identifier
+      - name: Import signing identity
+        if: ${{ env.HAS_SIGNING == 'true' }}
+        env:
+          HAS_SIGNING: ${{ secrets.BUILD_CERTIFICATE_BASE64 != '' }}
+        run: |
+          CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
+          PROFILE_PATH=$RUNNER_TEMP/profile.mobileprovision
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+
+          echo -n "${{ secrets.BUILD_CERTIFICATE_BASE64 }}" | base64 --decode -o $CERTIFICATE_PATH
+          echo -n "${{ secrets.BUILD_PROVISION_PROFILE_BASE64 }}" | base64 --decode -o $PROFILE_PATH
+
+          security create-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" $KEYCHAIN_PATH
+          security import $CERTIFICATE_PATH -P "${{ secrets.P12_PASSWORD }}" \
+            -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "${{ secrets.KEYCHAIN_PASSWORD }}" $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp $PROFILE_PATH ~/Library/MobileDevice/Provisioning\ Profiles/
+
+      - name: Archive and export (signed)
+        if: ${{ env.HAS_SIGNING == 'true' }}
+        env:
+          HAS_SIGNING: ${{ secrets.BUILD_CERTIFICATE_BASE64 != '' }}
+        run: |
+          xcodebuild \
+            -project ios/BFGCalibration.xcodeproj \
+            -scheme BFGCalibration \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            -archivePath build/BFGCalibration.xcarchive \
+            DEVELOPMENT_TEAM=${{ secrets.APPLE_TEAM_ID }} \
+            archive
+
+          cat > /tmp/export.plist <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>ad-hoc</string>
+            <key>compileBitcode</key><false/>
+            <key>stripSwiftSymbols</key><true/>
+          </dict></plist>
+          PLIST
+
+          xcodebuild -exportArchive \
+            -archivePath build/BFGCalibration.xcarchive \
+            -exportPath build/export \
+            -exportOptionsPlist /tmp/export.plist
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ env.HAS_SIGNING == 'true' }}
+        env:
+          HAS_SIGNING: ${{ secrets.BUILD_CERTIFICATE_BASE64 != '' }}
+        with:
+          name: BFGCalibration-signed-ipa
+          path: build/export/*.ipa
