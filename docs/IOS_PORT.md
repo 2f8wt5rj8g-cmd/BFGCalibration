@@ -38,7 +38,7 @@
      传输：BleTransport（CoreBluetooth）
      状态机：BfgBleClient
      凭据：KeychainCredentialStore   ← 替代 RootDb / VmDbBridge
-     界面：PrototypeWebView（WKWebView 复用原 HTML，零改动）
+     界面：PrototypeWebView（WKWebView 加载原 HTML，已做 iOS 适配，§8）
 ```
 
 ---
@@ -47,7 +47,7 @@
 
 | 层 | 状态 | 依据 |
 |---|---|---|
-| 加密 / 协议 / 策略 | ✅ **已验证** | 48 个测试在 Linux 上通过；AES 用 NIST FIPS-197 与 SP 800-38A 向量，SHA-1 用 RFC 3174 与 FIPS 180-4 向量 |
+| 加密 / 协议 / 策略 | ✅ **已验证** | 67 个测试在 Linux 上通过；AES 用 NIST FIPS-197 与 SP 800-38A 向量，SHA-1 用 RFC 3174 与 FIPS 180-4 向量 |
 | 帧格式 | ✅ **已验证** | 字节级断言，与 Android 逐字段比对 |
 | iOS App 层（CoreBluetooth / WKWebView / Keychain） | ⚠️ **仅编译验证** | 本机无 macOS，无法编译。由 GitHub Actions 的 macOS runner 编译 |
 | 真机 BLE 通信 | ❌ **未验证** | 需要真车 + 真机，无法用任何自动化手段替代 |
@@ -175,19 +175,22 @@ iOS 层无法在 Linux 上编译，因此用 **GitHub Actions 的 macOS runner �
 
 ## 8. 界面迁移
 
-**几乎免费。** 原主界面是单文件、零外部资源、零 localStorage 的内联 HTML（68 KB）。
+页面仍是单文件、零外部资源、零 localStorage 的内联 HTML，但**不再是原文件的逐字节副本**。最初的判断是「一个字节都不用改」，这个判断后来被证明是错的：原界面里有一半的入口只服务于 Android 的 root / 虚拟容器取凭据路径，iOS 上根本没有对应实现，留着就是按不动的死按钮，并且把排版挤乱。
 
-- 已复制到 `ios/BFGCalibration/Resources/`，**MD5 与 Android 版完全一致**（`31653d53...`）
-- 桥接：Android 用 `addJavascriptInterface` 注入 `BfgNative` 对象；iOS 无对应 API，改用 `WKUserScript` 在文档开始注入一个**同名同形的 shim**：
+当前差异分三类：
+
+1. **iOS 适配**：`<meta viewport>` 补 `viewport-fit=cover`（否则 `env(safe-area-inset-*)` 恒为 0）、锁定 `-webkit-text-size-adjust`（否则 iOS 会自行放大正文）。
+2. **移除 iOS 无法实现的入口**：导入九号出行 APK、账号登录、Root 读取本机、自动回退开关，以及它们的说明弹窗与文案。凭据改为「本机配对 → 系统钥匙串」这条 iOS 上真实存在的路径。
+3. **新增写入风险门**：写入前的倒计时确认。页面负责渲染与倒数，**权威计时在原生侧**（`TimedRiskGate`），确认手势带 nonce，过期或未勾选的确认会被原生端拒绝。
+
+桥接方式不变：Android 用 `addJavascriptInterface` 注入 `BfgNative`；iOS 无对应 API，改用 `WKUserScript` 在文档开始注入同名同形的 shim：
 
 ```js
 window.BfgNative = { action: (a, b) =>
   window.webkit.messageHandlers.BfgNative.postMessage({action: String(a), value: String(b ?? '')}) };
 ```
 
-→ **HTML 一个字都不用改。** 反向 `evaluateJavascript` 与 `evaluateJavaScript` 本就是同一个调用。
-
-只有一处小改进：`<meta viewport>` 建议补 `viewport-fit=cover`，否则 `env(safe-area-inset-*)` 在 iOS 上恒为 0。
+反向的 `evaluateJavascript` 与 `evaluateJavaScript` 本就是同一个调用，这部分确实无需改动。
 
 **可整体丢弃**：`page_ninebot_*.xml`（5 个被 WebView 覆盖的死布局）、`ninebot_styles.xml` / `ninebot_dimens.xml` 设计系统、大部分 `ic_ninebot_*` drawable、以及全部 BlackBox 界面。
 
@@ -209,15 +212,17 @@ window.BfgNative = { action: (a, b) =>
 ## 10. 剩余工作
 
 已完成：
-- [x] 核心层 14 个类移植 + 48 个测试在 Linux 通过
+- [x] 核心层移植 + 67 个测试在 Linux 通过
 - [x] 帧层移植 + 字节级测试
 - [x] iOS 层代码（CoreBluetooth / WKWebView / Keychain）
-- [x] XcodeGen 工程配置 + CI 流水线
-- [x] HTML 资源零改动复用
+- [x] XcodeGen 工程配置 + CI 流水线（macOS runner 上零警告通过）
+- [x] 写入链路：ACK 回执、写后回读、重试、写后断连判定
+- [x] 容量兼容扫描与寄存器扫描接线
+- [x] 写前备份 / 恢复（键为 14 位 SN，因 iOS 取不到 MAC）
+- [x] 写入风险门（30s 仪表盘双门 / 3s 计量模块，原生权威计时）
+- [x] 界面 iOS 化：移除 Android 专属入口、收敛文案、安全区与字号适配
 
 待办：
-- [ ] 在 GitHub Actions 跑通首次编译（预计需修若干编译错误）
-- [ ] 补齐写入流程的完整状态（`waitWriteAck` / `waitAfterProfile` / `waitAfterDis` 的回执处理仍是骨架）
-- [ ] 容量兼容扫描（`CAPACITY_SCAN_COMPAT`）的重复探测循环
-- [ ] 寄存器扫描（`registerScan`）的完整实现
-- [ ] 真车联调
+- [ ] **真车联调**（所有「已实现」目前只代表代码路径存在，不代表真车上跑得通）
+- [ ] 设备身份：真车广播名是否严格为 14 位 SN 需实测确认
+- [ ] 诊断导出目前只落一个文本摘要，未包含原始 BLE 帧

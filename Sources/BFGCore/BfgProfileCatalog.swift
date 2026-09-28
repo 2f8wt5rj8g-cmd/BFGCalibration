@@ -27,4 +27,31 @@ public enum BfgProfileCatalog {
         default: return -1
         }
     }
+
+    /// Voltage code carried in the low nibble of a profile byte.
+    public static func voltageCode(forVoltage voltage: Int) -> Int {
+        switch voltage {
+        case 72: return 0
+        case 48: return 2
+        default: return 1
+        }
+    }
+
+    /// Resolves the picker's `(voltage, capacity)` choice back into a profile.
+    ///
+    /// Port of the resolution in `MainActivity.performPrototypeWrite`. The
+    /// firmware table holds duplicate effective capacities, so a still-valid
+    /// current index wins; otherwise the lowest matching index is taken.
+    /// Returns -1 when the capacity is not part of this voltage's table.
+    public static func profileIndex(requestedMilliAh: Int, voltageCode: Int,
+                                    preferring currentIndex: Int) -> Int {
+        if currentIndex >= 0,
+           expectedCore((currentIndex << 4) | voltageCode) == requestedMilliAh {
+            return currentIndex
+        }
+        for index in 0...0xF where expectedCore((index << 4) | voltageCode) == requestedMilliAh {
+            return index
+        }
+        return -1
+    }
 }

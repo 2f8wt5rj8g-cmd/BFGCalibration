@@ -351,7 +351,10 @@
     #bfg-ui-prototype .nb-capacities { grid-template-columns: repeat(3, 1fr); }
     #bfg-ui-prototype .nb-modal-layer { border-radius: 27px; }
   }
-  html, body { margin: 0; min-height: 100%; background: #f4f7fb; }
+  html, body { margin: 0; min-height: 100%; background: #f4f7fb;
+    /* iOS inflates text on its own unless this is pinned; the page sets its
+       own scale deliberately. */
+    -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   /* The prototype root paints its own background, but the page around it has
      to match, otherwise a light band shows wherever a screen is shorter than
      the viewport. */
@@ -424,7 +427,6 @@ globalThis.lucide = {createIcons() {
     writeType: initial.writeType === 'dashboard' ? 'dashboard' : 'meter',
     voltage: [48, 60, 72].includes(Number(initial.voltage)) ? Number(initial.voltage) : 60,
     capacity: Number(initial.capacity) || 26,
-    officialImported: initial.officialImported === true, rootMode: false,
     vehicleSn: '', vehicleModel: '', vehicles: [], connected: false,
     soc: '--', batteryVoltage: '--', remainingCapacity: '--',
     dashboardVoltage: '--', dashboardCapacity: '--',
@@ -438,7 +440,7 @@ globalThis.lucide = {createIcons() {
     scanModule: '', scanReplies: 0, scanTimeouts: 0,
     dashboardWriteSupported: false, availableCapacities: [], capacityByVoltage: {},
     readOnlyVehicle: false,
-    rootFallback: true, appVersion: '', selectedVehicleIndex: 0,
+    appVersion: '', selectedVehicleIndex: 0,
     result: initial.result === 'failure' ? 'failure' : initial.result === 'success' ? 'success' : null,
     modal: null,
     radius: 22,
@@ -502,13 +504,9 @@ globalThis.lucide = {createIcons() {
         </section>
         <section class="nb-card nb-section">
           <div class="nb-vehicle-card" style="padding:0;border:0;background:transparent">
-            <div class="nb-vehicle-icon">${icon('smartphone')}</div>
-            <div class="nb-grow"><div class="nb-label">${state.rootMode ? '本机九号数据' : '九号出行'}</div><div class="nb-value">${state.rootMode ? 'Root 模式' : state.officialImported ? '安装包已导入' : '尚未导入'}</div><div class="nb-label">${state.vehicles.length ? `已找到 ${state.vehicles.length} 台车辆` : state.rootMode ? '点击下方按钮读取本机数据' : '登录账号后可读取车辆凭据'}</div></div>
-            <span class="nb-badge">${icon(state.rootMode || state.officialImported ? 'circle-check' : 'package-open')}${state.rootMode ? '本机读取' : state.officialImported ? '可登录' : '未导入'}</span>
-          </div>
-          <div class="nb-inline-actions">
-            <button class="nb-secondary" type="button" data-action="open-import">导入九号出行 APK</button>
-            <button class="nb-primary" type="button" data-action="${state.rootMode ? 'refresh-root' : 'open-login'}">${state.rootMode ? '读取本机车辆' : '登录九号出行'}</button>
+            <div class="nb-vehicle-icon">${icon('key-round')}</div>
+            <div class="nb-grow"><div class="nb-label">车辆凭据</div><div class="nb-value">${state.vehicleSn ? '已保存到系统钥匙串' : '尚未配对'}</div><div class="nb-label">${state.vehicleSn ? '可直接连接，无需在车上再次确认' : '配对一次后即可免按键重连'}</div></div>
+            <span class="nb-badge">${icon(state.vehicleSn ? 'circle-check' : 'key-round')}${state.vehicleSn ? '已配对' : '未配对'}</span>
           </div>
         </section>
         <section class="nb-section">
@@ -555,7 +553,7 @@ globalThis.lucide = {createIcons() {
       <main class="nb-content">
         <div class="nb-section-head"><h3 class="nb-section-title">我的车辆</h3><p class="nb-section-note">${state.vehicles.length} 台</p></div>
         <div class="nb-list">
-          ${state.vehicles.length ? state.vehicles.map((vehicle, index) => `<button type="button" class="nb-list-item" data-action="select-vehicle" data-index="${index}"><div class="nb-vehicle-icon">${icon('bike')}</div><div class="nb-grow"><div class="nb-value">${esc(vehicle.sn)}</div><div class="nb-label">${esc(vehicle.detail || '核对序列号确认车型再连接')}</div></div>${index === state.selectedVehicleIndex ? `<span class="nb-badge">当前</span>` : icon('chevron-right')}</button>`).join('') : `<div class="nb-card"><div class="nb-value">尚未找到车辆</div><div class="nb-label">可返回首页导入九号出行，或在设置中启用 Root 模式。</div></div>`}
+          ${state.vehicles.length ? state.vehicles.map((vehicle, index) => `<button type="button" class="nb-list-item" data-action="select-vehicle" data-index="${index}"><div class="nb-vehicle-icon">${icon('bike')}</div><div class="nb-grow"><div class="nb-value">${esc(vehicle.sn)}</div><div class="nb-label">${esc(vehicle.detail || '核对序列号确认车型再连接')}</div></div>${index === state.selectedVehicleIndex ? `<span class="nb-badge">当前</span>` : icon('chevron-right')}</button>`).join('') : `<div class="nb-card"><div class="nb-value">尚未找到车辆</div><div class="nb-label">返回首页发起配对，配对成功后车辆会出现在这里。</div></div>`}
         </div>
         <section class="nb-section"><button class="nb-secondary" type="button" data-action="refresh-vehicles">重新读取车辆</button></section>
       </main>
@@ -567,34 +565,27 @@ globalThis.lucide = {createIcons() {
     return `<div class="nb-page">
       ${header('设置', '数据来源与软件说明', true)}
       <main class="nb-content">
-        <section>
-          <div class="nb-section-head"><h3 class="nb-section-title">数据读取方式</h3></div>
-          <div class="nb-mode-list">
-            <button class="nb-mode ${!state.rootMode ? 'is-selected' : ''}" type="button" data-action="set-root" data-value="false"><span class="nb-mode-dot"></span><span class="nb-grow"><span class="nb-mode-title">导入九号出行 APK</span><span class="nb-mode-desc">在工具独立环境登录后读取车辆数据。</span></span></button>
-            <button class="nb-mode ${state.rootMode ? 'is-selected' : ''}" type="button" data-action="set-root" data-value="true"><span class="nb-mode-dot"></span><span class="nb-grow"><span class="nb-mode-title">Root 读取本机</span><span class="nb-mode-desc">直接读取原机九号出行数据，无需导入。</span></span></button>
-          </div>
-        </section>
         <section class="nb-card nb-section">
-          <div class="nb-info-list"><div class="nb-info-row"><span>已导入安装包</span><strong>${state.officialImported ? '已导入' : '尚未导入'}</strong></div><div class="nb-info-row"><span>读取失败自动回退</span><strong>${state.rootFallback ? '开启' : '关闭'}</strong></div></div>
-          <div class="nb-inline-actions"><button class="nb-secondary" type="button" data-action="open-import">导入 APK</button><button class="nb-secondary" type="button" data-action="import-root">从本机导入</button></div>
-          <button class="nb-secondary" style="margin-top:10px" type="button" data-action="toggle-fallback">${state.rootFallback ? '关闭' : '开启'}自动回退</button>
+          <div class="nb-section-head"><h3 class="nb-section-title">车辆凭据</h3></div>
+          <div class="nb-info-list"><div class="nb-info-row"><span>凭据来源</span><strong>本机配对</strong></div><div class="nb-info-row"><span>保存位置</span><strong>系统钥匙串</strong></div></div>
+          <p class="nb-label" style="margin-top:10px">配对时密钥由本机生成并写入车辆，确认后保存在系统钥匙串。之后连接无需再在车上按键。</p>
         </section>
         <section class="nb-card nb-section"><div class="nb-section-head"><h3 class="nb-section-title">参数备份与恢复</h3></div>
           <div class="nb-label">当前车辆</div><div class="nb-value" style="overflow-wrap:anywhere">${esc(maskedSn)}</div>
           <div class="nb-label" style="margin-top:12px">首次原参数</div><div class="nb-value" style="overflow-wrap:anywhere">${esc(state.firstBackup)}</div>
           <div class="nb-label" style="margin-top:12px">最近一次写入前参数</div><div class="nb-value" style="overflow-wrap:anywhere">${esc(state.recentBackup)}</div>
           <div class="nb-label" style="margin-top:12px">最近已确认的写入目标</div><div class="nb-value" style="overflow-wrap:anywhere">${esc(state.lastConfirmedTarget)}</div>
-          <p class="nb-label">写入前快照保存的是写入前的旧参数，不是这次选择的目标。恢复前会重新连接、读取并核对；备份不保证硬件异常后一定可以恢复。</p>
+          <p class="nb-label">写入前快照是写入前的旧参数，不是本次选择的目标。恢复会重新连接并核对；备份不保证硬件异常后一定能恢复。</p>
           <button class="nb-secondary" style="margin-top:12px" type="button" data-action="restore-first" ${!state.firstBackupValid || state.readOnlyVehicle ? 'disabled' : ''}>恢复首次原参数</button>
           ${state.backupAlternativesDiffer ? `<button class="nb-secondary" style="margin-top:10px" type="button" data-action="restore-prewrite" ${!state.recentBackupValid || state.readOnlyVehicle ? 'disabled' : ''}>恢复最近写入前参数</button>` : ''}
         </section>
         <section class="nb-section"><div class="nb-section-head"><h3 class="nb-section-title">维护与说明</h3></div>
           <div class="nb-list"><button class="nb-list-item" type="button" data-action="export-diag"><div class="nb-grow"><div class="nb-value">导出最近一次诊断</div><div class="nb-label">仅在需要排查连接问题时使用</div></div>${icon('chevron-right')}</button>
           <button class="nb-list-item" type="button" data-action="show-license"><div class="nb-grow"><div class="nb-value">关于与使用声明</div><div class="nb-label">版本 ${esc(state.appVersion)}</div></div>${icon('chevron-right')}</button>
-          <button class="nb-list-item" type="button" data-action="clear-data"><div class="nb-grow"><div class="nb-value">清空已导入九号出行数据</div><div class="nb-label">不会清空宿主九号出行的数据</div></div>${icon('chevron-right')}</button></div>
+          <button class="nb-list-item" type="button" data-action="clear-data"><div class="nb-grow"><div class="nb-value">清空本机车辆凭据</div><div class="nb-label">仅清除本工具保存的配对凭据</div></div>${icon('chevron-right')}</button></div>
         </section>
         <section class="nb-card nb-section"><div class="nb-section-head"><h3 class="nb-section-title">寄存器只读扫描</h3></div>
-          <p class="nb-label">先选择自己的车辆。扫描范围为 0x00–0xFF，只读取并记录响应，不发送写入命令；可能需要数分钟。</p>
+          <p class="nb-label">扫描 0x00–0xFF 全区段，只读取不写入，可能需要数分钟。</p>
           <button class="nb-secondary" style="margin-top:12px" type="button" data-action="scan-dis">扫描仪表盘寄存器</button>
           <button class="nb-secondary" style="margin-top:10px" type="button" data-action="scan-bfg">扫描计量模块寄存器</button>
         </section>
@@ -780,7 +771,7 @@ globalThis.lucide = {createIcons() {
     return `<div class="nb-modal-layer" role="dialog" aria-modal="true" aria-label="仪表盘写入条件"><div class="nb-modal">
       <div class="nb-modal-icon">${icon('shield-alert')}</div>
       <h3>当前不可写入仪表盘</h3>
-      <p>四项固件须全部匹配，且仪表电压配置须读取成功。不满足时工具不会发送仪表盘写入命令。</p>
+      <p>四项固件须全部匹配，且仪表电压配置须读取成功，否则不发送写入命令。</p>
       <div class="nb-fw-list">${versions.map(([name, expected, actual]) => `<div class="nb-fw-row"><span>${name}</span><strong>需 ${expected}</strong><em class="${actual === expected ? 'is-match' : ''}">当前 ${esc(actual)}</em></div>`).join('')}</div>
       <p style="margin-top:12px">仪表当前电压：${esc(state.dashboardVoltage)}。计量模块临时写入有独立的读取与风险确认条件。</p>
       <div class="nb-btn-row"><button type="button" class="nb-secondary" data-action="close-modal">返回</button><button type="button" class="nb-primary" data-action="refresh-review">重新读取</button></div>
@@ -798,40 +789,62 @@ globalThis.lucide = {createIcons() {
     </div></div>`;
   }
 
-  function officialAppModal() {
-    if (state.modal === 'missing-vehicle') {
-      return `<div class="nb-modal-layer" role="dialog" aria-modal="true" aria-label="未找到车辆"><div class="nb-modal">
-        <div class="nb-modal-icon">${icon('bike')}</div>
-        <h3>还没有可连接的车辆</h3>
-        <p>${state.rootMode ? '请先读取本机九号数据，或选择临时密钥配对。' : '可以先导入九号出行 APK 并用账号密码登录，也可以直接在车上确认临时密钥配对。'}</p>
-        <div class="nb-btn-row"><button type="button" class="nb-secondary" data-action="close-modal">返回</button><button type="button" class="nb-primary" data-action="${state.rootMode ? 'refresh-root' : 'goto-import'}">${state.rootMode ? '读取本机车辆' : '去导入 APK'}</button></div>
-        <button type="button" class="nb-secondary" style="margin-top:10px" data-action="pair-list">临时密钥配对</button>
-      </div></div>`;
-    }
-    if (state.modal === 'import-apk') {
-      return `<div class="nb-modal-layer" role="dialog" aria-modal="true" aria-label="导入九号出行 APK"><div class="nb-modal">
-        <div class="nb-modal-icon">${icon('package-plus')}</div>
-        <h3>导入九号出行 APK</h3>
-        <p>选择你自己准备的九号出行安装包。工具本身不内置九号出行。</p>
-        <div class="nb-card"><div class="nb-info-list"><div class="nb-info-row"><span>文件格式</span><strong>APK</strong></div><div class="nb-info-row"><span>导入后</span><strong>可打开登录</strong></div></div></div>
-        <div class="nb-btn-row"><button type="button" class="nb-secondary" data-action="close-modal">取消</button><button type="button" class="nb-primary" data-action="select-apk">选择 APK 文件</button></div>
-      </div></div>`;
-    }
-    if (state.modal === 'login-ninebot' && !state.officialImported) {
-      return `<div class="nb-modal-layer" role="dialog" aria-modal="true" aria-label="请先导入九号出行"><div class="nb-modal">
-        <div class="nb-modal-icon">${icon('package-open')}</div>
-        <h3>请先导入九号出行 APK</h3>
-        <p>当前工具没有内置九号出行。完成导入后，再使用账号密码登录。</p>
-        <div class="nb-btn-row"><button type="button" class="nb-secondary" data-action="close-modal">取消</button><button type="button" class="nb-primary" data-action="goto-import">去导入</button></div>
-      </div></div>`;
-    }
-    return `<div class="nb-modal-layer" role="dialog" aria-modal="true" aria-label="登录九号出行"><div class="nb-modal">
-      <div class="nb-modal-icon">${icon('log-in')}</div>
-      <h3>登录九号出行</h3>
-      <p>请使用账号密码登录。登录完成后返回 BFG 电量校准，再连接车辆。</p>
-      <div class="nb-card"><div class="nb-info-list"><div class="nb-info-row"><span>九号出行</span><strong>已导入</strong></div><div class="nb-info-row"><span>登录方式</span><strong>账号密码</strong></div></div></div>
-      <div class="nb-btn-row"><button type="button" class="nb-secondary" data-action="close-modal">取消</button><button type="button" class="nb-primary" data-action="launch-ninebot">打开九号出行</button></div>
+  function missingVehicleModal() {
+    return `<div class="nb-modal-layer" role="dialog" aria-modal="true" aria-label="未找到车辆"><div class="nb-modal">
+      <div class="nb-modal-icon">${icon('bike')}</div>
+      <h3>还没有可连接的车辆</h3>
+      <p>车辆凭据来自本机配对：在车上确认一次临时密钥，之后即可免按键连接。</p>
+      <div class="nb-btn-row"><button type="button" class="nb-secondary" data-action="close-modal">返回</button><button type="button" class="nb-primary" data-action="pair-list">临时密钥配对</button></div>
     </div></div>`;
+  }
+
+  /// The risk gate. The countdown is only presentation: the native side holds
+  /// the authoritative deadline and re-checks it when the confirmation arrives.
+  function writeGateModal() {
+    const gate = state.writeGate;
+    if (!gate) return '';
+    return `<div class="nb-modal-layer" role="dialog" aria-modal="true" aria-label="写入风险确认"><div class="nb-modal">
+      <div class="nb-modal-icon">${icon('shield-alert')}</div>
+      <h3>${esc(gate.title)}</h3>
+      <p>${esc(gate.intro)}</p>
+      <div class="nb-alert danger">${icon('triangle-alert')}<span>${esc(gate.critical)}</span></div>
+      <label style="display:flex;gap:12px;align-items:flex-start;margin:16px 0;min-height:48px;font-size:15px;line-height:1.5;cursor:pointer">
+        <input type="checkbox" id="write-gate-check" style="width:22px;height:22px;flex:0 0 22px;margin:2px 0 0">
+        <span>${esc(gate.acknowledgement)}</span>
+      </label>
+      <div class="nb-btn-row"><button type="button" class="nb-secondary" data-action="write-gate-cancel">取消</button><button type="button" class="nb-primary" id="write-gate-confirm" disabled data-action="write-gate-confirm">${esc(gate.action)}</button></div>
+    </div></div>`;
+  }
+
+  let gateTimer = null;
+  let gateNonceSeen = null;
+  let gateDeadline = 0;
+
+  /// Re-armed after every render. The deadline is anchored to the gate's nonce so
+  /// an unrelated repaint cannot restart the wait.
+  function startGateTimer() {
+    if (gateTimer) { clearInterval(gateTimer); gateTimer = null; }
+    const gate = state.writeGate;
+    if (!gate || state.modal !== 'write-gate') { gateNonceSeen = null; return; }
+    if (gateNonceSeen !== gate.nonce) {
+      gateNonceSeen = gate.nonce;
+      gateDeadline = Date.now() + (Number(gate.seconds) || 0) * 1000;
+    }
+    const button = document.getElementById('write-gate-confirm');
+    const box = document.getElementById('write-gate-check');
+    const label = gate.action;
+    const sync = () => {
+      if (!button) return;
+      const left = Math.max(0, Math.ceil((gateDeadline - Date.now()) / 1000));
+      button.disabled = !(left === 0 && !!(box && box.checked));
+      button.textContent = left > 0 ? `${label}（${left}秒）` : label;
+    };
+    if (box) box.onchange = sync;
+    sync();
+    gateTimer = setInterval(() => {
+      sync();
+      if (Date.now() >= gateDeadline && gateTimer) { clearInterval(gateTimer); gateTimer = null; }
+    }, 250);
   }
 
   function statusModal() {
@@ -880,7 +893,8 @@ globalThis.lucide = {createIcons() {
     else if (state.screen === 'review') html = reviewTemplate();
     else if (state.screen === 'write') html = writeTemplate();
     else html = homeTemplate();
-    screen.innerHTML = `<div class="nb-page-wrap">${html}${state.modal === 'wake' ? wakeModal() : state.modal === 'write-confirm' ? writeConfirmModal() : state.modal === 'dashboard-requirements' ? dashboardRequirementsModal() : state.modal === 'import-apk' || state.modal === 'login-ninebot' || state.modal === 'missing-vehicle' ? officialAppModal() : statusModal()}</div>`;
+    screen.innerHTML = `<div class="nb-page-wrap">${html}${state.modal === 'wake' ? wakeModal() : state.modal === 'write-confirm' ? writeConfirmModal() : state.modal === 'write-gate' ? writeGateModal() : state.modal === 'dashboard-requirements' ? dashboardRequirementsModal() : state.modal === 'missing-vehicle' ? missingVehicleModal() : statusModal()}</div>`;
+    startGateTimer();
     const modalVisibility = state.modal ? 'open' : 'closed';
     if (modalVisibility !== lastModalVisibility) {
       lastModalVisibility = modalVisibility;
@@ -935,20 +949,11 @@ globalThis.lucide = {createIcons() {
     else if (action === 'vehicles' || action === 'settings') { go(action); }
     else if (action === 'select-vehicle') { state.selectedVehicleIndex = Number(actionEl.dataset.index); if (window.BfgNative) nativeAction('select-vehicle', String(state.selectedVehicleIndex)); go('home'); }
     else if (action === 'refresh-vehicles') { if (window.BfgNative) nativeAction('refresh-vehicles'); }
-    else if (action === 'set-root') { state.rootMode = actionEl.dataset.value === 'true'; render(); if (window.BfgNative) nativeAction('set-root', String(state.rootMode)); }
-    else if (action === 'toggle-fallback') { state.rootFallback = !state.rootFallback; render(); if (window.BfgNative) nativeAction('set-fallback', String(state.rootFallback)); }
-    else if (action === 'import-root') { if (window.BfgNative) nativeAction('import-root'); }
     else if (action === 'export-diag' || action === 'show-license' || action === 'clear-data'
              || action === 'restore-first' || action === 'restore-prewrite') { if (window.BfgNative) nativeAction(action); }
     else if (action === 'scan-dis' || action === 'scan-bfg') { state.scanModule = action === 'scan-dis' ? '仪表盘' : '计量模块'; state.errorMessage = ''; state.scanReplies = 0; state.scanTimeouts = 0; go('scan-progress'); if (window.BfgNative) nativeAction(action); }
     else if (action === 'cancel-scan') { if (window.BfgNative) nativeAction('cancel'); go('settings'); }
-    else if (action === 'open-import') { state.modal = 'import-apk'; render(); save(); }
-    else if (action === 'open-login') { state.modal = 'login-ninebot'; render(); save(); }
     else if (action === 'show-dashboard-requirements') { state.modal = 'dashboard-requirements'; render(); }
-    else if (action === 'goto-import') { state.modal = 'import-apk'; render(); save(); }
-    else if (action === 'select-apk') { if (window.BfgNative) nativeAction('select-apk'); else state.officialImported = true; state.modal = null; render(); save(); }
-    else if (action === 'launch-ninebot') { state.modal = null; render(); save(); if (window.BfgNative) nativeAction('launch-ninebot'); }
-    else if (action === 'refresh-root') { state.modal = null; render(); if (window.BfgNative) nativeAction('refresh-root'); }
     else if (action === 'pair-list') { go('pair-list'); if (window.BfgNative) nativeAction('pair-scan'); }
     else if (action === 'pair-select') { const index = Number(actionEl.dataset.index); state.selectedPairIndex = index; const vehicle = state.vehicles[index]; if (vehicle) state.vehicleSn = vehicle.sn; if (window.BfgNative) nativeAction('pair-select', String(index)); showWake('pair'); }
     else if (action === 'connect-start') { if (window.BfgNative && !state.vehicleSn) { state.modal = 'missing-vehicle'; render(); } else showWake('connect'); }
@@ -965,6 +970,13 @@ globalThis.lucide = {createIcons() {
     }
     else if (action === 'post-write-reread') { state.modal = null; go('post-write-check'); if (window.BfgNative) nativeAction('post-write-reread'); }
     else if (action === 'confirm-unverified-dis') { state.modal = null; state.writeStage = 'precheck'; go('write-progress'); if (window.BfgNative) nativeAction('confirm-unverified-dis'); }
+    else if (action === 'write-gate-confirm') {
+      const box = document.getElementById('write-gate-check');
+      const confirmButton = document.getElementById('write-gate-confirm');
+      if (confirmButton && confirmButton.disabled) return;
+      if (window.BfgNative) nativeAction('write-gate-confirm', JSON.stringify({ nonce: state.writeGate ? state.writeGate.nonce : -1, checked: !!(box && box.checked) }));
+    }
+    else if (action === 'write-gate-cancel') { state.writeGate = null; state.modal = null; render(); save(); if (window.BfgNative) nativeAction('write-gate-cancel'); }
     else if (action === 'begin-pair') completeConnection(true);
     else if (action === 'begin-connect') completeConnection(false);
     else if (action === 'write') go('write');
@@ -989,6 +1001,10 @@ globalThis.lucide = {createIcons() {
     const update = typeof json === 'string' ? JSON.parse(json) : json;
     Object.assign(state, update);
     if (update.screen) { state.screen = update.screen; nativeAction('screen', update.screen); }
+    // A gate arriving opens its modal; the native side clears it after the write.
+    if (Object.prototype.hasOwnProperty.call(update, 'writeGate')) {
+      state.modal = update.writeGate ? 'write-gate' : null;
+    }
     if (update.result && !Object.prototype.hasOwnProperty.call(update, 'modal')) state.modal = null;
     render();
   };

@@ -19,7 +19,7 @@ BFG电量校准的 iOS 版本。原工程是 Android 的第三方九号车辆电
 | 凭据来源 | 读九号 App 数据库（root / 虚拟容器） | 本 App 自行配对协商 |
 | 凭据存储 | 仅进程内存，冷启动失效 | 系统钥匙串，跨启动有效 |
 | 需要 root | 是（或虚拟化容器） | 否 |
-| 界面 | WebView 加载 HTML | WKWebView 加载**同一个** HTML（MD5 一致，零改动） |
+| 界面 | WebView 加载 HTML | WKWebView 加载同一份 HTML（已做 iOS 适配，见 `docs/IOS_PORT.md` §8） |
 
 ---
 
@@ -27,7 +27,7 @@ BFG电量校准的 iOS 版本。原工程是 Android 的第三方九号车辆电
 
 ```
 Sources/BFGCore/         可移植核心（加密 / 协议 / 策略）
-Tests/BFGCoreTests/      48 个测试
+Tests/BFGCoreTests/      67 个测试
 ios/BFGCalibration/      iOS 应用层（CoreBluetooth / WKWebView / Keychain）
 ios/project.yml          XcodeGen 工程定义
 .github/workflows/       macOS 构建流水线
@@ -40,7 +40,7 @@ docs/                    设计与签名文档
 
 | 层 | 状态 |
 |---|---|
-| 加密 / 协议 / 策略 | ✅ 48 个测试通过（AES 用 NIST 向量，SHA-1 用 RFC 3174 向量） |
+| 加密 / 协议 / 策略 | ✅ 67 个测试通过（AES 用 NIST 向量，SHA-1 用 RFC 3174 向量） |
 | 帧格式 | ✅ 字节级断言 |
 | iOS 应用层 | ✅ **类型检查通过**（`Tools/typecheck-ios.sh`）；行为验证在 CI 的 macOS runner |
 | 真机 BLE | ❌ 未验证，需真车 + 真机 |

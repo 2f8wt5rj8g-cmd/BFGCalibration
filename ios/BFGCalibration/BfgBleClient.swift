@@ -56,7 +56,33 @@ final class BfgBleClient: NSObject {
         var mode: CommunicationModeResolver.Mode = .unsupported
         var writeSupported = false
         var scannedCapacity = -1
+        var scannedCapacityRegister = -1
+        var capacityScanReason = ""
         var registerScanReplies = 0
+        var registerScanTimeouts = 0
+        var registerScanModule = -1
+
+        // Write path, mirroring the Android `Result` fields of the same role.
+        var writeAckSeen = false
+        var writeAckFrame = ""
+        var afterProfile = -1
+        var afterCapacityRaw = -1
+        var capacityReadbackVerified = false
+        var verificationRetried = false
+        var disConfigTargetRaw = -1
+        var disConfigAfterRaw = -1
+        var resolvedBeforeSoc = -1
+        var resolvedBeforeCapacityRaw = -1
+        var resolvedAfterCapacityRaw = -1
+
+        /// Android substitutes the scanned capacity for the raw 0x1C reading when
+        /// the vehicle only resolved in compatibility mode. An unsupported
+        /// combination reports no capacity rather than a misleading raw value.
+        var displayBeforeCapacity: Int {
+            if resolvedBeforeCapacityRaw >= 0 { return resolvedBeforeCapacityRaw }
+            return mode == .unsupported ? -1 : bfgCapacity
+        }
+        var displaySoc: Int { resolvedBeforeSoc >= 0 ? resolvedBeforeSoc : bfgSoc }
 
         var meterNominalVoltage: Int {
             profileRaw < 0 ? -1 : BfgProfileCatalog.nominalVoltage(profileRaw)
@@ -109,6 +135,25 @@ final class BfgBleClient: NSObject {
     private var registerScanModule = 0
     private var registerScanIndex = 0
 
+    /// Capacity compatibility scan: `[register][repeat]`, rows initialised to -1
+    /// so a register that never answered cannot be mistaken for a zero reading.
+    private var capacityScanValues = [[Int]](repeating: [Int](repeating: -1, count: 3), count: 5)
+    private var capacityScanLastFrames = [String](repeating: "", count: 5)
+    private var capacityScanRegisterIndex = 0
+    private var capacityScanRepeatIndex = 0
+
+    /// Verification is driven by its own work item rather than `timeout`, because
+    /// a lost write ACK must fall through to a read-back instead of failing.
+    private var verifyWork: DispatchWorkItem?
+    private var verifyScheduled = false
+    private var profileRetryPending = false
+
+    /// DIS config the user was shown when the write was confirmed, so a value
+    /// that moved underneath us aborts instead of being overwritten.
+    private let expectedDisConfigRaw: Int
+    /// Set once the user accepted an unvalidated dashboard voltage encoding.
+    private let allowUnverifiedDis: Bool
+
     private var timeoutWork: DispatchWorkItem?
     private let queue = DispatchQueue(label: "com.bfgtools.calibration.client")
 
@@ -118,10 +163,13 @@ final class BfgBleClient: NSObject {
     private var awaitingCentralState = false
 
     init(record: DeviceRecord, operation: Operation, targetProfile: Int = -1,
+         expectedDisConfigRaw: Int = -1, allowUnverifiedDis: Bool = false,
          listener: Listener) {
         self.record = record
         self.operation = operation
         self.targetProfile = targetProfile
+        self.expectedDisConfigRaw = expectedDisConfigRaw
+        self.allowUnverifiedDis = allowUnverifiedDis
         self.listener = listener
         super.init()
         transport.delegate = self
@@ -389,6 +437,19 @@ final class BfgBleClient: NSObject {
         case .waitAuth:
             guard NinebotFrame.isFrame(plain, src: 0x04, dst: 0x3E, cmd: 0x5D) else { return }
             clearTimeout()
+            if operation == .registerScan {
+                // A read-only sweep needs no vehicle identification first; it
+                // walks every address of the chosen module.
+                guard RegisterReadPlan.supports(targetProfile) else {
+                    fail("只读扫描只支持仪表盘和计量模块。")
+                    return
+                }
+                registerScanModule = targetProfile
+                result.registerScanModule = registerScanModule
+                registerScanIndex = RegisterReadPlan.first
+                requestRegisterScan()
+                return
+            }
             status("认证完成；开始读取车辆参数…")
             state = .waitBeforeProfile
             send(NinebotFrame.readProfile)
@@ -481,7 +542,104 @@ final class BfgBleClient: NSObject {
             guard index == 0x92, plain.count >= 9 else { return }
             result.disConfigRaw = NinebotFrame.readLe16(plain, offset: 7)
             clearTimeout()
-            resolveAndMaybeWrite()
+            afterDisConfigRead()
+
+        case .waitCapacityCompatScan:
+            let register = CapacityCompatibilityResolver.registers[capacityScanRegisterIndex]
+            let index = try requireHeader(plain, src: 0x10, dst: 0x3E, cmd: 0x01, len: 9)
+            guard index == register, plain.count >= 9 else { return }
+            let value = NinebotFrame.readLe16(plain, offset: 7)
+            capacityScanValues[capacityScanRegisterIndex][capacityScanRepeatIndex] = value
+            capacityScanLastFrames[capacityScanRegisterIndex] = Hex.encode(plain)
+            log(String(format: "CAPACITY_COMPAT_RX reg=0x%02X pass=%d value=%d",
+                       register, capacityScanRepeatIndex + 1, value))
+            clearTimeout()
+            advanceCapacityCompatibilityScan()
+
+        case .waitWriteAck:
+            // CMD 0x02 is answered by CMD 0x05. The ACK only accelerates the
+            // read-back; losing it must never fail the write.
+            guard NinebotFrame.isFrame(plain, src: 0x10, dst: 0x3E, cmd: 0x05) else { return }
+            result.writeAckSeen = true
+            result.writeAckFrame = Hex.encode(plain)
+            log("WRITE_ACK=" + result.writeAckFrame)
+            scheduleVerifySoon()
+
+        case .waitAfterProfile:
+            let index = try requireHeader(plain, src: 0x10, dst: 0x3E, cmd: 0x01, len: 8)
+            guard index == 0x00, plain.count >= 8 else { return }
+            result.afterProfile = Int(plain[7])
+            clearTimeout()
+            guard result.afterProfile == targetProfile else {
+                guard profileVerifyAttempts < NinebotFrame.maxProfileVerifyAttempts else {
+                    fail(String(format: "连续%d次回读仍为0x%02X，目标为0x%02X",
+                                profileVerifyAttempts, result.afterProfile, targetProfile))
+                    return
+                }
+                result.verificationRetried = true
+                status(String(format: "暂时仍是旧档位 0x%02X；等待车辆保存后再次回读（%d/%d）…",
+                              result.afterProfile, profileVerifyAttempts + 1,
+                              NinebotFrame.maxProfileVerifyAttempts))
+                guard !profileRetryPending else { return }
+                profileRetryPending = true
+                scheduleVerify(after: 1.0) { [weak self] in self?.retryProfileVerificationSafely() }
+                return
+            }
+            result.profileReadbackVerified = true
+            if result.mode == .capacityScanCompat {
+                // Compatibility mode has no trustworthy 0x1C to re-read; the
+                // expected core value for the profile is the confirmation.
+                result.resolvedAfterCapacityRaw = BfgProfileCatalog.expectedCore(targetProfile)
+                finish(String(format: "Profile 0x%02X 已通过%@回读确认。",
+                              targetProfile, CommunicationModeResolver.label(result.mode)))
+                return
+            }
+            state = .waitAfterCapacity
+            status("Profile回读完成；读取新的 capacity_core…")
+            requestCapacityVerification()
+
+        case .waitAfterCapacity:
+            let index = try requireHeader(plain, src: 0x10, dst: 0x3E, cmd: 0x01, len: 9)
+            guard index == 0x1C, plain.count >= 9 else { return }
+            result.afterCapacityRaw = NinebotFrame.readLe16(plain, offset: 7)
+            result.capacityReadbackVerified = true
+            result.resolvedAfterCapacityRaw = result.afterCapacityRaw
+            clearTimeout()
+            finish(String(format: "Profile 0x%02X 已写入并回读确认。", targetProfile))
+
+        case .waitDisWriteAck:
+            guard NinebotFrame.isFrame(plain, src: 0x01, dst: 0x3E, cmd: 0x05) else { return }
+            result.writeAckSeen = true
+            result.writeAckFrame = Hex.encode(plain)
+            log("DIS_CONFIG_WRITE_ACK=" + result.writeAckFrame)
+            scheduleVerify(after: 0.7) { [weak self] in self?.verifyAfterDisWriteSafely() }
+
+        case .waitDisAfter:
+            let index = try requireHeader(plain, src: 0x01, dst: 0x3E, cmd: 0x01, len: 9)
+            guard index == 0x92, plain.count >= 9 else { return }
+            result.disConfigAfterRaw = NinebotFrame.readLe16(plain, offset: 7)
+            clearTimeout()
+            if result.disConfigAfterRaw == result.disConfigTargetRaw {
+                result.disConfigReadbackVerified = true
+                finish("仪表电压配置已回读为目标值；断电保持仍需实车验证。")
+            } else if disVerifyAttempts < NinebotFrame.maxDisVerifyAttempts {
+                result.verificationRetried = true
+                scheduleVerify(after: 1.0) { [weak self] in self?.retryDisVerificationSafely() }
+            } else {
+                fail("仪表配置连续回读仍与目标不一致，请重新连接读取当前配置。")
+            }
+
+        case .waitRegisterScan:
+            let length = try RegisterReadPlan.length(module: registerScanModule,
+                                                     index: registerScanIndex)
+            let index = try requireHeader(plain, src: registerScanModule, dst: 0x3E,
+                                          cmd: 0x01, len: 7 + length)
+            guard index == registerScanIndex else { return }
+            result.registerScanReplies += 1
+            log(String(format: "REGISTER_READ module=0x%02X index=0x%02X length=%d",
+                       registerScanModule, registerScanIndex, length))
+            clearTimeout()
+            advanceRegisterScan()
 
         default:
             break
@@ -555,6 +713,112 @@ final class BfgBleClient: NSObject {
         }
     }
 
+    // MARK: - Capacity compatibility scan
+
+    /// Runs only when the meter firmware is unrecognised or the plain 0x1C
+    /// capacity reading is implausible, which is how older vehicles still become
+    /// writable instead of being rejected outright.
+    private func afterDisConfigRead() {
+        if needsCapacityCompatibilityScan() {
+            beginCapacityCompatibilityScan()
+        } else {
+            resolveAndMaybeWrite()
+        }
+    }
+
+    private func needsCapacityCompatibilityScan() -> Bool {
+        let knownMeter = result.meterFirmware == 0x0429 || result.meterFirmware == 0x0286
+        let expected = BfgProfileCatalog.expectedCore(result.profileRaw)
+        let capacityInvalid = !CapacityCompatibilityResolver.isPlausible(result.bfgCapacity)
+            || (expected > 0 && result.bfgCapacity != expected)
+        return !knownMeter || capacityInvalid
+    }
+
+    private func beginCapacityCompatibilityScan() {
+        capacityScanValues = [[Int]](repeating: [Int](repeating: -1, count: 3), count: 5)
+        capacityScanLastFrames = [String](repeating: "", count: 5)
+        capacityScanRegisterIndex = 0
+        capacityScanRepeatIndex = 0
+        state = .waitCapacityCompatScan
+        log("CAPACITY_COMPAT_SCAN_BEGIN")
+        requestCurrentCapacityCompatibilityRegister()
+    }
+
+    private func requestCurrentCapacityCompatibilityRegister() {
+        let register = CapacityCompatibilityResolver.registers[capacityScanRegisterIndex]
+        send(NinebotFrame.readBfgWord(register: register))
+        timeout(.waitCapacityCompatScan, 4,
+                String(format: "读取兼容容量地址0x%02X无回复", register))
+    }
+
+    private func advanceCapacityCompatibilityScan() {
+        capacityScanRepeatIndex += 1
+        if capacityScanRepeatIndex >= CapacityCompatibilityResolver.repeats {
+            capacityScanRepeatIndex = 0
+            capacityScanRegisterIndex += 1
+        }
+        guard capacityScanRegisterIndex < CapacityCompatibilityResolver.registers.count else {
+            finishCapacityCompatibilityScan()
+            return
+        }
+        requestCurrentCapacityCompatibilityRegister()
+    }
+
+    private func finishCapacityCompatibilityScan() {
+        let expected = BfgProfileCatalog.expectedCore(result.profileRaw)
+        let scan = CapacityCompatibilityResolver.resolve(expectedCapacity: expected,
+                                                         readings: capacityScanValues)
+        result.scannedCapacity = scan.selectedCapacity
+        result.scannedCapacityRegister = scan.selectedRegister
+        result.capacityScanReason = scan.reason
+        log("CAPACITY_COMPAT_RESULT selected=\(scan.selectedCapacity) reg=0x\(String(format: "%02X", scan.selectedRegister)) reason=\(scan.reason)")
+        resolveAndMaybeWrite()
+    }
+
+    // MARK: - Register scan
+
+    private func requestRegisterScan() {
+        guard registerScanIndex <= RegisterReadPlan.last else {
+            finish(String(format: "只读扫描完成：0x%02X 模块，%d 个地址有响应。",
+                          registerScanModule, result.registerScanReplies))
+            return
+        }
+        state = .waitRegisterScan
+        if registerScanIndex % 16 == 0 {
+            status("正在只读扫描：\(registerScanIndex)/256（可取消）")
+        }
+        do {
+            send(try RegisterReadPlan.request(module: registerScanModule, index: registerScanIndex))
+        } catch {
+            fail(describe(error))
+            return
+        }
+        // A missing address is normal across a 256-address sweep, so the
+        // per-index timeout is soft: it counts and advances.
+        timeoutScanRead()
+    }
+
+    private func timeoutScanRead() {
+        timeoutWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.finished, self.state == .waitRegisterScan else { return }
+            self.result.registerScanTimeouts += 1
+            self.advanceRegisterScan()
+        }
+        timeoutWork = work
+        queue.asyncAfter(deadline: .now() + 0.65, execute: work)
+    }
+
+    private func advanceRegisterScan() {
+        registerScanIndex += 1
+        scheduleVerify(after: 0.05) { [weak self] in
+            guard let self, !self.finished, self.state == .waitRegisterScan else { return }
+            self.requestRegisterScan()
+        }
+    }
+
+    // MARK: - Communication mode and write entry
+
     private func resolveAndMaybeWrite() {
         let decision = CommunicationModeResolver.resolve(
             profile: result.profileRaw,
@@ -568,60 +832,184 @@ final class BfgBleClient: NSObject {
 
         result.mode = decision.mode
         result.writeSupported = decision.writeSupported
+        result.resolvedBeforeSoc = decision.resolvedSoc
+        result.resolvedBeforeCapacityRaw = decision.resolvedCapacity
+        log("MODE=\(CommunicationModeResolver.label(decision.mode)) reason=\(decision.reason)")
 
         switch operation {
+        case .writeDisVoltage:
+            beginDisVoltageWrite()
         case .writeProfile:
             guard decision.writeSupported else {
-                fail(DashboardWritePolicy.blockedMessage)
+                fail("当前仪表与计量模块组合尚未通过写入验证；"
+                    + "本次没有发送写入。请先导出诊断数据用于适配。")
                 return
             }
-            guard !WriteAccessPolicy.isReadOnlySerial(record.effectiveSn) else {
-                fail("该序列号以 N 开头，仅允许读取，不发送任何写入指令。")
-                return
-            }
-            sendWriteProfile()
-        case .writeDisVoltage:
-            guard DashboardWritePolicy.allows(dashboard: result.dashboardFirmware,
-                                              colorDisplay: result.colorDisplayVersion,
-                                              centre: result.centreControllerVersion,
-                                              meter: result.meterFirmware) else {
-                fail(DashboardWritePolicy.blockedMessage)
-                return
-            }
-            do {
-                let target = try DisVoltageConfig.target(currentRaw: result.disConfigRaw,
-                                                         voltage: voltageForProfile(targetProfile))
-                result.writeCommandSent = true
-                state = .waitDisWriteAck
-                send(try disWriteFrame(target))
-                timeout(.waitDisWriteAck, 5, "写入确认无回复")
-            } catch {
-                fail(describe(error))
-            }
+            beginProfileWrite()
         default:
-            finish("识别完成")
+            finish("车辆数据读取完成；已自动识别通信模式，本次没有写入。")
         }
     }
 
-    private func voltageForProfile(_ profile: Int) -> Int {
-        let nominal = BfgProfileCatalog.nominalVoltage(profile)
-        return nominal > 0 ? nominal : 60
-    }
-
-    private func disWriteFrame(_ targetRaw: Int) throws -> [UInt8] {
-        // Reuses the tested builder rather than re-deriving the layout here.
-        try DisVoltageConfig.writePacket(targetRaw)
-    }
-
-    private func sendWriteProfile() {
-        writeAckTimeout()
-    }
-
-    private func writeAckTimeout() {
-        result.writeCommandSent = true
+    private func beginProfileWrite() {
+        guard !WriteAccessPolicy.isReadOnlySerial(record.effectiveSn) else {
+            fail("该序列号以 N 开头，仅允许读取，不发送任何写入指令。")
+            return
+        }
         state = .waitWriteAck
+        verifyScheduled = false
+        profileVerifyAttempts = 0
+        capacityVerifyAttempts = 0
+        status(String(format: "%@；准备写入 Profile 0x%02X…",
+                      CommunicationModeResolver.label(result.mode), targetProfile))
         send(NinebotFrame.writeProfile(targetProfile))
-        timeout(.waitWriteAck, 5, "写入确认无回复")
+        result.writeCommandSent = true
+        // CMD 0x02 should answer with CMD 0x05. Even if that ACK is lost, the
+        // value is confirmed by a fresh READ instead of a second WRITE.
+        scheduleVerify(after: 2.4) { [weak self] in self?.verifyAfterWriteSafely() }
+    }
+
+    /// For `.writeDisVoltage` the operation's target is the nominal voltage the
+    /// user picked; the raw register encoding is derived from the current config.
+    private func beginDisVoltageWrite() {
+        guard !WriteAccessPolicy.isReadOnlySerial(record.effectiveSn) else {
+            fail("该序列号以 N 开头，仅允许读取，不发送任何写入指令。")
+            return
+        }
+        guard DashboardWritePolicy.allows(dashboard: result.dashboardFirmware,
+                                          colorDisplay: result.colorDisplayVersion,
+                                          centre: result.centreControllerVersion,
+                                          meter: result.meterFirmware) else {
+            fail(DashboardWritePolicy.blockedMessage)
+            return
+        }
+        if expectedDisConfigRaw >= 0 && result.disConfigRaw != expectedDisConfigRaw {
+            fail("仪表配置在确认后发生变化；本次未写入，请重新连接读取。")
+            return
+        }
+        let targetRaw: Int
+        do {
+            targetRaw = try DisVoltageConfig.target(currentRaw: result.disConfigRaw,
+                                                    voltage: targetProfile)
+        } catch {
+            fail(describe(error))
+            return
+        }
+        if DisVoltageConfig.requiresExtraWarning(currentRaw: result.disConfigRaw,
+                                                 targetRaw: targetRaw) && !allowUnverifiedDis {
+            fail("该仪表配置尚未验证；本次未写入。")
+            return
+        }
+        result.disConfigTargetRaw = targetRaw
+        if targetRaw == result.disConfigRaw {
+            result.disConfigAfterRaw = targetRaw
+            result.disConfigReadbackVerified = true
+            finish("仪表已是所选电压档位，无需写入。")
+            return
+        }
+        state = .waitDisWriteAck
+        disVerifyAttempts = 0
+        status("正在尝试写入仪表电压配置；之后会自动回读…")
+        do {
+            send(try DisVoltageConfig.writePacket(targetRaw))
+        } catch {
+            fail(describe(error))
+            return
+        }
+        result.writeCommandSent = true
+        log(String(format: "DIS_CONFIG_WRITE before=0x%02X target=0x%02X",
+                   result.disConfigRaw, targetRaw))
+        // A lost ACK must not cause a second write; verification only re-reads.
+        scheduleVerify(after: 2.2) { [weak self] in self?.verifyAfterDisWriteSafely() }
+    }
+
+    // MARK: - Write verification
+
+    /// Follow-up work that deliberately outlives `clearTimeout()`: the write
+    /// verification chain is triggered by the reply, not by a failure timer.
+    private func scheduleVerify(after seconds: Double, _ work: @escaping () -> Void) {
+        let item = DispatchWorkItem(block: work)
+        verifyWork?.cancel()
+        verifyWork = item
+        queue.asyncAfter(deadline: .now() + seconds, execute: item)
+    }
+
+    private func scheduleVerifySoon() {
+        guard !verifyScheduled, !finished, state == .waitWriteAck else { return }
+        verifyScheduled = true
+        scheduleVerify(after: 0.8) { [weak self] in self?.verifyAfterWriteSafely() }
+    }
+
+    private func verifyAfterWriteSafely() {
+        guard !finished, state == .waitWriteAck else { return }
+        state = .waitAfterProfile
+        requestProfileVerification()
+    }
+
+    private func retryProfileVerificationSafely() {
+        profileRetryPending = false
+        guard !finished, state == .waitAfterProfile else { return }
+        requestProfileVerification()
+    }
+
+    private func requestProfileVerification() {
+        profileRetryPending = false
+        profileVerifyAttempts += 1
+        if profileVerifyAttempts > 1 { result.verificationRetried = true }
+        status(String(format: "写入已发送；正在回读 Profile（%d/%d）…",
+                      profileVerifyAttempts, NinebotFrame.maxProfileVerifyAttempts))
+        send(NinebotFrame.readProfile)
+        timeout(.waitAfterProfile, 4.5, "写入后Profile回读无回复")
+    }
+
+    private func requestCapacityVerification() {
+        capacityVerifyAttempts += 1
+        if capacityVerifyAttempts > 1 { result.verificationRetried = true }
+        send(NinebotFrame.readCapacity)
+        timeout(.waitAfterCapacity, 4.5, "写入后读取容量参数无回复")
+    }
+
+    private func verifyAfterDisWriteSafely() {
+        guard !finished, state == .waitDisWriteAck else { return }
+        state = .waitDisAfter
+        requestDisVerification()
+    }
+
+    private func retryDisVerificationSafely() {
+        guard !finished, state == .waitDisAfter else { return }
+        requestDisVerification()
+    }
+
+    private func requestDisVerification() {
+        disVerifyAttempts += 1
+        status(String(format: "仪表写入已发送，正在回读配置（%d/%d）…",
+                      disVerifyAttempts, NinebotFrame.maxDisVerifyAttempts))
+        send(NinebotFrame.readDisConfig)
+        timeout(.waitDisAfter, 4.5, "仪表配置回读无回复")
+    }
+
+    /// A post-write disconnect is its own outcome: the command may well have
+    /// landed, so it is reported as unconfirmed rather than as a plain failure.
+    private func handlePostWriteConnectionLoss() -> Bool {
+        guard result.writeCommandSent else { return false }
+        switch operation {
+        case .writeDisVoltage:
+            if result.disConfigReadbackVerified {
+                finish("仪表配置已回读确认；随后连接中断。断电保持仍需验证。")
+            } else {
+                fail("仪表写入指令已发送，但连接中断，结果尚未确认；请重新连接读取当前配置。")
+            }
+            return true
+        case .writeProfile:
+            if result.profileReadbackVerified || result.afterProfile == targetProfile {
+                finish("Profile 已回读确认；随后连接中断。")
+            } else {
+                fail("写入指令已发送，但连接中断，结果尚未确认；请重新连接读取当前配置。")
+            }
+            return true
+        default:
+            return false
+        }
     }
 
     // MARK: - Helpers
@@ -695,16 +1083,7 @@ extension BfgBleClient: BleTransportDelegate {
 
     func bleTransport(didDisconnect error: Error?) {
         guard !finished else { return }
-        // The Android client treated a post-write disconnect as a distinct,
-        // reportable outcome rather than a generic failure.
-        if result.writeCommandSent {
-            if result.disConfigReadbackVerified || result.profileReadbackVerified {
-                finish("写入指令已发出且已回读确认；随后连接中断。")
-            } else {
-                fail("写入指令已发送，但连接中断，结果尚未确认；请重新连接读取当前配置。")
-            }
-            return
-        }
+        if handlePostWriteConnectionLoss() { return }
         fail("连接已断开" + (error.map { "：\($0.localizedDescription)" } ?? ""))
     }
 
