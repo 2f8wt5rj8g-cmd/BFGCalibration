@@ -82,7 +82,11 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
         "vehicles": [],
         "rootMode": false,
         "rootFallback": false,
-        "readOnlyVehicle": false
+        "readOnlyVehicle": false,
+        // Dark is the primary look. Send `false` to use the light theme, or
+        // derive it from traitCollection.userInterfaceStyle to follow the
+        // system instead.
+        "dark": true
     ]
 
     func attach(_ webView: WKWebView) {

@@ -37,13 +37,29 @@ SCREENS=(
   post-write-check scan-progress scan-result
 )
 
+# Representative values so screens render with content instead of placeholders.
+# Purely for screenshots — nothing here reaches the app.
+SAMPLE='
+  soc: 76, batteryVoltage: "58.2 V", remainingCapacity: "14.8 Ah",
+  dashboardVoltage: "60 V", dashboardCapacity: "15.0 Ah",
+  meterVoltage: "60 V", meterCapacity: "15.0 Ah",
+  dashboardFirmware: "2.5.9", colorDisplayFirmware: "1.5.5",
+  centreFirmware: "5.10.0", meterFirmware: "4.2.9",
+  vehicleSn: "TEST0000000001", vehicleModel: "九号 F2 长续航",
+  connected: true, writeSupported: true, voltage: "60", capacity: "26000",
+  availableCapacities: ["20000", "26000", "30000"],
+  busyMessage: "正在读取车辆参数…", scanReplies: 12, scanTimeouts: 3,
+  errorMessage: "通信组合尚未验证，关键BFG回读不一致"
+'
+
 for screen in "${SCREENS[@]}"; do
   page="/tmp/bfg-screens/$screen.html"
-  python3 - "$HTML" "$page" "$screen" <<'PY'
+  python3 - "$HTML" "$page" "$screen" "$SAMPLE" <<'PY'
 import sys
-src, dest, screen = sys.argv[1], sys.argv[2], sys.argv[3]
+src, dest, screen, sample = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 inject = (
     '<script>window.addEventListener("load",function(){'
+    f'window.bfgNativeUpdate && window.bfgNativeUpdate({{{sample}}});'
     f'window.bfgNativeGo && window.bfgNativeGo("{screen}");'
     '});</script>'
 )

@@ -38,24 +38,34 @@
     --nb-danger: #d44747;
     --nb-danger-bg: #fff0f0;
     --nb-shadow: 0 22px 70px rgba(33, 56, 91, .17);
+    --nb-accent-soft: rgba(47, 124, 246, .18);
+    --nb-glow: 0 10px 30px rgba(47, 124, 246, .28);
+    --nb-hairline: rgba(255, 255, 255, .85);
     color-scheme: light dark;
     width: 100%;
   }
   #bfg-ui-prototype[data-dark="true"] {
-    --nb-bg: #090f1b;
-    --nb-surface: #111a2a;
-    --nb-surface-2: #17243a;
-    --nb-surface-3: #0d1523;
-    --nb-text: #edf4ff;
-    --nb-muted: #9cadc7;
-    --nb-line: #293750;
-    --nb-success: #42d392;
-    --nb-success-bg: #103325;
-    --nb-warning: #ffb65b;
-    --nb-warning-bg: #382611;
-    --nb-danger: #ff7777;
-    --nb-danger-bg: #3a171b;
-    --nb-shadow: 0 24px 80px rgba(0, 0, 0, .48);
+    /* Deep, cool blacks with a faint blue cast. Surfaces step up in even
+       increments so card edges read without needing heavy borders. */
+    --nb-bg: #05090f;
+    --nb-surface: #0c1320;
+    --nb-surface-2: #131d2e;
+    --nb-surface-3: #090f1a;
+    --nb-text: #e9f1ff;
+    --nb-muted: #8296b3;
+    --nb-line: #1d2b42;
+    --nb-accent: #3d8bff;
+    --nb-accent-soft: rgba(61, 139, 255, .16);
+    --nb-success: #34d399;
+    --nb-success-bg: #0d2a22;
+    --nb-warning: #fbbf5b;
+    --nb-warning-bg: #2e2312;
+    --nb-danger: #f87171;
+    --nb-danger-bg: #2e1618;
+    --nb-shadow: 0 24px 70px rgba(0, 0, 0, .55);
+    /* Ring + halo used by primary actions and the SOC gauge. */
+    --nb-glow: 0 10px 30px rgba(61, 139, 255, .30);
+    --nb-hairline: rgba(255, 255, 255, .06);
   }
   #bfg-ui-prototype * { box-sizing: border-box; }
   #bfg-ui-prototype .nb-stage {
@@ -207,8 +217,42 @@
   #bfg-ui-prototype .nb-primary, #bfg-ui-prototype .nb-secondary, #bfg-ui-prototype .nb-danger-btn {
     min-height: 52px; width: 100%; border-radius: 17px; padding: 13px 16px; font: inherit; font-weight: 500;
   }
-  #bfg-ui-prototype .nb-primary { border: 0; background: var(--nb-accent); color: #fff; }
-  #bfg-ui-prototype .nb-primary:disabled { background: #aeb9ca; color: #fff; cursor: not-allowed; }
+  #bfg-ui-prototype .nb-primary {
+    border: 0; color: #fff;
+    background-image: linear-gradient(180deg, rgba(255, 255, 255, .18), rgba(255, 255, 255, 0) 58%);
+    background-color: var(--nb-accent);
+    box-shadow: var(--nb-glow);
+  }
+  /* A disabled action is not an invitation: drop the glow entirely. */
+  #bfg-ui-prototype .nb-primary:disabled {
+    background-image: none; background-color: var(--nb-surface-2);
+    color: var(--nb-muted); box-shadow: none; cursor: not-allowed;
+  }
+
+  /* Hero metrics: a SOC ring carrying the one number that matters, with the
+     supporting values stacked beside it. */
+  #bfg-ui-prototype .nb-hero-metrics {
+    display: grid; grid-template-columns: 92px 1fr; gap: 14px; align-items: center;
+  }
+  #bfg-ui-prototype .nb-ring { position: relative; width: 92px; height: 92px; display: grid; place-items: center; }
+  #bfg-ui-prototype .nb-ring svg { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); }
+  #bfg-ui-prototype .nb-ring-track { fill: none; stroke: var(--nb-line); stroke-width: 7; }
+  #bfg-ui-prototype .nb-ring-fill {
+    fill: none; stroke: var(--nb-accent); stroke-width: 7; stroke-linecap: round;
+    filter: drop-shadow(0 0 7px var(--nb-accent-soft));
+  }
+  #bfg-ui-prototype .nb-ring.is-unknown .nb-ring-fill { stroke: var(--nb-muted); filter: none; }
+  #bfg-ui-prototype .nb-ring-text { position: relative; text-align: center; }
+  #bfg-ui-prototype .nb-ring-text strong { display: block; font-size: 21px; font-weight: 600; letter-spacing: -.02em; }
+  #bfg-ui-prototype .nb-ring-text span { display: block; font-size: 11px; color: var(--nb-muted); margin-top: 1px; }
+  #bfg-ui-prototype .nb-metric-stack { display: grid; gap: 9px; }
+  #bfg-ui-prototype .nb-metric-sm {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 11px 13px; border-radius: 14px;
+    background: var(--nb-surface-3); border: 1px solid var(--nb-line);
+  }
+  #bfg-ui-prototype .nb-metric-sm .nb-label { min-height: 0; margin: 0; text-align: left; }
+  #bfg-ui-prototype .nb-metric-sm .nb-value { font-size: 16px; text-align: right; }
   #bfg-ui-prototype .nb-secondary { border: 1px solid var(--nb-line); background: var(--nb-surface); color: var(--nb-text); }
   #bfg-ui-prototype .nb-danger-btn { border: 0; background: var(--nb-danger); color: #fff; }
   #bfg-ui-prototype .nb-btn-row { display: grid; grid-template-columns: 1fr 1.35fr; gap: 10px; margin-top: 14px; }
@@ -223,7 +267,12 @@
   #bfg-ui-prototype .nb-center { text-align: center; }
   #bfg-ui-prototype .nb-center p { margin: 7px 0 0; color: var(--nb-muted); font-size: 13px; line-height: 1.5; }
   #bfg-ui-prototype .nb-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
-  #bfg-ui-prototype .nb-metric { padding: 14px 10px; border-radius: 18px; background: var(--nb-surface-3); text-align: center; }
+  #bfg-ui-prototype .nb-metric {
+    padding: 14px 10px; border-radius: 18px; background: var(--nb-surface-3); text-align: center;
+    border: 1px solid var(--nb-line);
+    /* Hairline along the top edge fakes a light source without a real gradient. */
+    box-shadow: inset 0 1px 0 var(--nb-hairline);
+  }
   #bfg-ui-prototype .nb-metric .nb-label { min-height: 34px; }
   #bfg-ui-prototype .nb-metric .nb-value { font-size: 19px; }
   #bfg-ui-prototype .nb-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; overflow: hidden; padding: 0; }
@@ -303,6 +352,11 @@
     #bfg-ui-prototype .nb-modal-layer { border-radius: 27px; }
   }
   html, body { margin: 0; min-height: 100%; background: #f4f7fb; }
+  /* The prototype root paints its own background, but the page around it has
+     to match, otherwise a light band shows wherever a screen is shorter than
+     the viewport. */
+  html:has(#bfg-ui-prototype[data-dark="true"]),
+  body:has(#bfg-ui-prototype[data-dark="true"]) { background: #05090f; }
   #bfg-ui-prototype { color-scheme: light; }
   #bfg-ui-prototype[data-dark="true"] { color-scheme: dark; }
   #bfg-ui-prototype .nb-stage { display: block; }
@@ -394,6 +448,26 @@ globalThis.lucide = {createIcons() {
 
   const icon = name => `<i data-lucide="${name}" aria-hidden="true"></i>`;
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  // SOC ring. Falls back to an empty track when the value is unknown so the
+  // layout does not jump between "--" and a real reading.
+  function socRing(raw) {
+    const digits = String(raw ?? '').replace(/[^\d.]/g, '');
+    const value = Number(digits);
+    const known = digits !== '' && Number.isFinite(value) && value >= 0 && value <= 100;
+    const pct = known ? Math.max(0, Math.min(100, value)) : 0;
+    const radius = 34;
+    const circumference = 2 * Math.PI * radius;
+    const filled = (pct / 100) * circumference;
+    return `<div class="nb-ring${known ? '' : ' is-unknown'}">
+      <svg viewBox="0 0 80 80" aria-hidden="true">
+        <circle class="nb-ring-track" cx="40" cy="40" r="${radius}"></circle>
+        <circle class="nb-ring-fill" cx="40" cy="40" r="${radius}"
+          stroke-dasharray="${filled.toFixed(2)} ${(circumference - filled).toFixed(2)}"></circle>
+      </svg>
+      <div class="nb-ring-text"><strong>${known ? Math.round(pct) + '%' : '--'}</strong><span>当前电量</span></div>
+    </div>`;
+  }
   let maskedSn = '尚未选择车辆';
   const visibleSn = () => state.connected ? maskedSn : (state.vehicleSn || '尚未选择车辆');
   const nativeAction = (action, value = '') => { if (window.BfgNative) window.BfgNative.action(action, String(value)); };
@@ -619,10 +693,13 @@ globalThis.lucide = {createIcons() {
           <div class="nb-vehicle-card" style="padding:0;border:0;background:transparent">
             <div class="nb-vehicle-icon">${icon('bike')}</div><div class="nb-grow"><div class="nb-value">${esc(maskedSn)}</div><div class="nb-label">${esc(state.vehicleModel)} · 蓝牙已连接</div></div><span class="nb-badge">${icon('bluetooth')}已连接</span>
           </div>
-          <div class="nb-grid-3 nb-section">
-            <div class="nb-metric"><div class="nb-label">当前电量</div><div class="nb-value">${esc(state.soc)}%</div></div>
-            <div class="nb-metric"><div class="nb-label">电池电压</div><div class="nb-value">${esc(state.batteryVoltage)}</div></div>
-            <div class="nb-metric"><div class="nb-label">剩余容量</div><div class="nb-value">${esc(state.remainingCapacity)}</div></div>
+          <div class="nb-hero-metrics nb-section">
+            ${socRing(state.soc)}
+            <div class="nb-metric-stack">
+              <div class="nb-metric-sm"><div class="nb-label">电池电压</div><div class="nb-value">${esc(state.batteryVoltage)}</div></div>
+              <div class="nb-metric-sm"><div class="nb-label">剩余容量</div><div class="nb-value">${esc(state.remainingCapacity)}</div></div>
+              <div class="nb-metric-sm"><div class="nb-label">标称电压</div><div class="nb-value">${esc(state.dashboardVoltage)}</div></div>
+            </div>
           </div>
         </section>
         <section class="nb-section">
@@ -783,7 +860,9 @@ globalThis.lucide = {createIcons() {
   function render() {
     root.style.setProperty('--nb-radius', `${state.radius}px`);
     root.style.setProperty('--nb-accent', state.accent);
-    root.dataset.dark = state.dark ? 'true' : 'false';
+    // Dark is the primary look. Light stays available but must be asked for
+    // explicitly with state.dark === false.
+    root.dataset.dark = state.dark === false ? 'false' : 'true';
     maskedSn = state.vehicleSn.length > 8
       ? `${state.vehicleSn.slice(0, 4)}••••${state.vehicleSn.slice(-5)}` : state.vehicleSn;
     root.querySelector('.nb-phone').style.fontSize = state.compact ? '14px' : '16px';
