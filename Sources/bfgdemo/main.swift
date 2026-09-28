@@ -49,6 +49,7 @@ var results: [CaseResult] = []
 func run(_ name: String, vehicle: VirtualVehicle, operation: BfgBleClient.Operation,
          targetProfile: Int = -1, store: InMemoryCredentialStore,
          record: DeviceRecord? = nil, timeout: TimeInterval = 90,
+         dumpModules: [Int] = [],
          verify: (Collector, VirtualVehicle) -> String?) -> CaseResult {
     let link = VirtualLink(vehicle: vehicle)
     let collector = Collector()
@@ -58,6 +59,7 @@ func run(_ name: String, vehicle: VirtualVehicle, operation: BfgBleClient.Operat
                                         source: "simulator")
     let client = BfgBleClient(record: device, operation: operation,
                               targetProfile: targetProfile,
+                              dumpModules: dumpModules,
                               transport: link, credentialStore: store,
                               listener: collector)
 
@@ -151,7 +153,11 @@ do {
         guard r.colorDisplayVersion != -1, r.centreControllerVersion != -1 else {
             return "彩屏/中控版本缺失"
         }
-        guard r.mode != .unsupported else { return "通信模式未判定为可用" }
+        // Profile and capacity agree in the default vehicle, so this has to
+        // resolve as the standard path rather than falling into compatibility.
+        guard r.mode == .standard else {
+            return "应判定为标准模式，实际 \(CommunicationModeResolver.label(r.mode))"
+        }
         guard r.writeSupported else { return "writeSupported 为假，后续写入会被拒" }
         return nil
     }
@@ -295,6 +301,51 @@ do {
         guard let r = c.finished else { return "无结果" }
         guard r.registerScanReplies > 0 else { return "未收到任何应答" }
         guard r.registerScanTimeouts + r.registerScanReplies > 0 else { return "计数未回填" }
+        return nil
+    }
+}
+
+// MARK: - 13. 寄存器快照（写前备份的底座）
+
+do {
+    let vehicle = makeVehicle()
+    run("寄存器快照：两遍读取与静态表一致性", vehicle: vehicle,
+        operation: .dumpRegisters, store: pairedStore, timeout: 300,
+        dumpModules: [RegisterDump.dashboardModule, 0x09, RegisterDump.meterModule]) { c, _ in
+        if let f = c.failure { return "失败：\(f)" }
+        guard let r = c.finished, let dump = r.registerDump else { return "未产出快照" }
+        guard dump.entries.count == 256 * 3 else {
+            return "条目数应为 \(256 * 3)，实际 \(dump.entries.count)"
+        }
+        guard dump.fingerprint.isComplete else { return "固件指纹不完整" }
+        // 车端 profile 与容量自洽，静态表应当被认为成立
+        guard dump.agreement() == .agrees else {
+            return "静态表一致性判定异常：\(dump.agreement())"
+        }
+        guard let profile = dump.entry(module: RegisterDump.meterModule, index: 0x00),
+              profile.value == vehicle.config.profile else { return "profile 地址读取不符" }
+        guard let capacity = dump.entry(module: RegisterDump.meterModule, index: 0x1C),
+              capacity.value == vehicle.config.capacityMah else { return "容量地址读取不符" }
+        return nil
+    }
+}
+
+// MARK: - 14. 静态表与车辆不符时必须能检出
+
+do {
+    // 车端容量被改成与档位不符，模拟「这版固件与静态表不一致」
+    let vehicle = makeVehicle { $0.capacityMah = 18000 }
+    run("静态表一致性：不符时必须检出", vehicle: vehicle,
+        operation: .dumpRegisters, store: pairedStore, timeout: 300,
+        dumpModules: [RegisterDump.meterModule]) { c, _ in
+        if let f = c.failure { return "失败：\(f)" }
+        guard let r = c.finished, let dump = r.registerDump else { return "未产出快照" }
+        guard case .disagrees(let expected, let reported) = dump.agreement() else {
+            return "应判为不一致，实际 \(dump.agreement())"
+        }
+        guard expected == 26000, reported == 18000 else {
+            return "不一致详情不符：期望 26000 / 实际 \(reported)"
+        }
         return nil
     }
 }

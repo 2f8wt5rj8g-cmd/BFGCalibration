@@ -25,6 +25,9 @@ public final class BfgBleClient: NSObject {
         /// Collects nearby vehicles for the user to confirm before pairing,
         /// rather than connecting to the first match.
         case discoverVehicles
+        /// Sweeps a module's whole register space twice, so a write can be
+        /// measured against what the vehicle held beforehand.
+        case dumpRegisters
     }
 
     public protocol Listener: AnyObject {
@@ -68,6 +71,8 @@ public final class BfgBleClient: NSObject {
         public var registerScanReplies = 0
         public var registerScanTimeouts = 0
         public var registerScanModule = -1
+        /// Populated by `.dumpRegisters`.
+        public var registerDump: RegisterDump?
 
         // Write path, mirroring the Android `Result` fields of the same role.
         public var writeAckSeen = false
@@ -120,7 +125,7 @@ public final class BfgBleClient: NSObject {
         case waitDisBattery, waitDisVrlaVoltage, waitDisBfgVersion
         case waitColorDisplayVersion, waitCentreControllerVersion
         case waitDisConfig, waitDisWriteAck, waitDisAfter
-        case waitCapacityCompatScan, waitRegisterScan
+        case waitCapacityCompatScan, waitRegisterScan, waitDumpScan
         case waitWriteAck, waitAfterProfile, waitAfterCapacity
         case done
     }
@@ -177,6 +182,15 @@ public final class BfgBleClient: NSObject {
     private var timeoutWork: DispatchWorkItem?
     private let queue = DispatchQueue(label: "com.bfgtools.calibration.client")
 
+    /// Modules to sweep for a register dump, in order.
+    private let dumpModules: [Int]
+    private var dumpModuleCursor = 0
+    private var dumpIndex = 0
+    /// 0 records the first reading, 1 re-reads to establish stability.
+    private var dumpPass = 0
+    private var dumpFirstPass: [String: Int] = [:]
+    private var dumpEntries: [RegisterDump.Entry] = []
+
     /// How long the vehicle list scans before reporting what it found.
     private static let discoveryWindow: Double = 8
     /// Vehicles seen during a `.discoverVehicles` scan, de-duplicated by the
@@ -190,6 +204,7 @@ public final class BfgBleClient: NSObject {
 
     public init(record: DeviceRecord, operation: Operation, targetProfile: Int = -1,
          expectedDisConfigRaw: Int = -1, allowUnverifiedDis: Bool = false,
+         dumpModules: [Int] = [],
          transport: BleTransport, credentialStore: CredentialStore,
          listener: Listener) {
         self.record = record
@@ -197,6 +212,7 @@ public final class BfgBleClient: NSObject {
         self.targetProfile = targetProfile
         self.expectedDisConfigRaw = expectedDisConfigRaw
         self.allowUnverifiedDis = allowUnverifiedDis
+        self.dumpModules = dumpModules
         self.transport = transport
         self.credentialStore = credentialStore
         self.listener = listener
@@ -335,6 +351,11 @@ public final class BfgBleClient: NSObject {
                 afterDisConfigRead()
             }
 
+        case .waitDumpScan:
+            // A silent address is a normal part of sweeping 256 of them.
+            recordDumpTimeout(dumpModules[dumpModuleCursor], dumpIndex)
+            advanceDumpScan()
+
         case .waitCapacityCompatScan:
             capacityScanValues[capacityScanRegisterIndex][capacityScanRepeatIndex] = -1
             log("兼容容量地址无回复；继续扫描。")
@@ -413,7 +434,7 @@ public final class BfgBleClient: NSObject {
                  .waitDisBattery, .waitDisVrlaVoltage, .waitDisBfgVersion,
                  .waitColorDisplayVersion, .waitCentreControllerVersion,
                  .waitDisConfig, .waitDisWriteAck, .waitDisAfter,
-                 .waitCapacityCompatScan, .waitRegisterScan,
+                 .waitCapacityCompatScan, .waitRegisterScan, .waitDumpScan,
                  .waitWriteAck, .waitAfterProfile, .waitAfterCapacity:
                 try handleSessionReply(encrypted)
             default:
@@ -561,6 +582,16 @@ public final class BfgBleClient: NSObject {
         case .waitAuth:
             guard NinebotFrame.isFrame(plain, src: 0x04, dst: 0x3E, cmd: 0x5D) else { return }
             clearTimeout()
+            if operation == .dumpRegisters {
+                // The sweep needs the session AUTH established first, so it
+                // starts here rather than at connect time.
+                guard !dumpModules.isEmpty else {
+                    fail("未指定要读取的寄存器模块。")
+                    return
+                }
+                beginDumpSweep()
+                return
+            }
             if operation == .registerScan {
                 // A read-only sweep needs no vehicle identification first; it
                 // walks every address of the chosen module.
@@ -753,6 +784,20 @@ public final class BfgBleClient: NSObject {
                 fail("仪表配置连续回读仍与目标不一致，请重新连接读取当前配置。")
             }
 
+        case .waitDumpScan:
+            let module = dumpModules[dumpModuleCursor]
+            let length = RegisterReadPlan.probeLength(module: module, index: dumpIndex)
+            let index = try requireReadAck(plain, src: module, len: 7 + length)
+            guard index == dumpIndex else { return }
+            clearTimeout()
+            // Two meter addresses answer with a single byte; reading those as
+            // a 16-bit word would index past the end of the frame.
+            let value = length >= 2
+                ? NinebotFrame.readLe16(plain, offset: 7)
+                : Int(plain[7])
+            recordDumpValue(module, dumpIndex, value)
+            advanceDumpScan()
+
         case .waitRegisterScan:
             let length = try RegisterReadPlan.length(module: registerScanModule,
                                                      index: registerScanIndex)
@@ -901,6 +946,93 @@ public final class BfgBleClient: NSObject {
     }
 
     // MARK: - Register scan
+
+    /// Starts a full two-pass sweep. The module list comes from the caller
+    /// because the cost is dominated by the soft timeout on silent addresses:
+    /// sweeping one module before a write is quick, sweeping the whole bus is
+    /// a deliberate, slow operation.
+    private func beginDumpSweep() {
+        dumpModuleCursor = 0
+        dumpIndex = 0
+        dumpPass = 0
+        dumpFirstPass = [:]
+        dumpEntries = []
+        state = .waitDumpScan
+        status("正在读取寄存器快照（第 1 遍）…")
+        requestDumpRead()
+    }
+
+    private func requestDumpRead() {
+        let module = dumpModules[dumpModuleCursor]
+        send(RegisterReadPlan.probeRequest(module: module, index: dumpIndex))
+        timeout(.waitDumpScan, 0.65, "寄存器读取无回复")
+    }
+
+    private func recordDumpValue(_ module: Int, _ index: Int, _ value: Int) {
+        let key = "\(module):\(index)"
+        if dumpPass == 0 {
+            dumpFirstPass[key] = value
+        } else {
+            let first = dumpFirstPass[key]
+            dumpEntries.append(RegisterDump.Entry(
+                module: module, index: index,
+                length: RegisterReadPlan.probeLength(module: module, index: index),
+                value: value, stable: first == nil || first == value, responded: true))
+        }
+    }
+
+    /// Records an address that did not answer. A silent first pass still needs
+    /// an entry, so the second pass writes one marked unresponsive.
+    private func recordDumpTimeout(_ module: Int, _ index: Int) {
+        guard dumpPass == 1 else { return }
+        let key = "\(module):\(index)"
+        dumpEntries.append(RegisterDump.Entry(
+            module: module, index: index,
+            length: RegisterReadPlan.probeLength(module: module, index: index),
+            value: -1, stable: false, responded: dumpFirstPass[key] != nil))
+    }
+
+    private func advanceDumpScan() {
+        dumpIndex += 1
+        if dumpIndex > RegisterReadPlan.last {
+            dumpIndex = RegisterReadPlan.first
+            dumpModuleCursor += 1
+            if dumpModuleCursor >= dumpModules.count {
+                dumpModuleCursor = 0
+                dumpPass += 1
+                if dumpPass > 1 {
+                    finishDump()
+                    return
+                }
+                status("正在复核寄存器快照（第 2 遍）…")
+            }
+        }
+        scheduleVerify(after: 0.05) { [weak self] in
+            guard let self, !self.finished, self.state == .waitDumpScan else { return }
+            self.requestDumpRead()
+        }
+    }
+
+    private func finishDump() {
+        // The fingerprint comes from the dump itself where it can: a dump taken
+        // without walking the DIS chain would otherwise carry no versions at
+        // all, and the versions are exactly what identifies the build.
+        result.registerDump = RegisterDump(
+            serial: result.serial,
+            fingerprint: RegisterDump.Fingerprint(
+                dashboard: dumpValue(0x01, 0x1A) ?? result.dashboardFirmware,
+                colorDisplay: dumpValue(0x01, 0xD1) ?? result.colorDisplayVersion,
+                centre: dumpValue(0x09, 0x02) ?? result.centreControllerVersion,
+                meter: dumpValue(0x01, 0x3D) ?? result.meterFirmware),
+            timestamp: Int64((Date().timeIntervalSince1970 * 1000).rounded()),
+            entries: dumpEntries)
+        finish("寄存器快照完成：\(dumpEntries.count) 个地址，"
+            + "\(dumpEntries.filter(\.responded).count) 个有响应。")
+    }
+
+    private func dumpValue(_ module: Int, _ index: Int) -> Int? {
+        dumpEntries.first { $0.module == module && $0.index == index && $0.responded }?.value
+    }
 
     private func requestRegisterScan() {
         guard registerScanIndex <= RegisterReadPlan.last else {

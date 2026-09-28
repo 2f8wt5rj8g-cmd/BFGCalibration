@@ -586,6 +586,11 @@ globalThis.lucide = {createIcons() {
           <button class="nb-list-item" type="button" data-action="show-license"><div class="nb-grow"><div class="nb-value">关于与使用声明</div><div class="nb-label">版本 ${esc(state.appVersion)}</div></div>${icon('chevron-right')}</button>
           <button class="nb-list-item" type="button" data-action="clear-data"><div class="nb-grow"><div class="nb-value">清空本机车辆凭据</div><div class="nb-label">仅清除本工具保存的配对凭据</div></div>${icon('chevron-right')}</button></div>
         </section>
+        <section class="nb-card nb-section"><div class="nb-section-head"><h3 class="nb-section-title">寄存器快照（适配本车型）</h3></div>
+          <p class="nb-label">读取整片寄存器并导出为文件，用于确认这版固件的地址与容量对应关系。写入失败时可据此适配。可能需要数分钟。</p>
+          <button class="nb-secondary" style="margin-top:12px" type="button" data-action="dump-registers">导出寄存器快照</button>
+          <button class="nb-secondary" style="margin-top:10px" type="button" data-action="compare-dump" ${state.dumpReady ? '' : 'disabled'}>与上次快照对比</button>
+        </section>
         <section class="nb-card nb-section"><div class="nb-section-head"><h3 class="nb-section-title">寄存器只读扫描</h3></div>
           <p class="nb-label">扫描 0x00–0xFF 全区段，只读取不写入，可能需要数分钟。</p>
           <button class="nb-secondary" style="margin-top:12px" type="button" data-action="scan-dis">扫描仪表盘寄存器</button>
@@ -870,6 +875,7 @@ globalThis.lucide = {createIcons() {
       'write-failure': ['circle-x', '写入未完成', state.errorMessage || '请重新读取当前参数，再决定是否重试。', '再次尝试', 'retry-write', '取消', 'close-modal'],
       'verification-incomplete': ['triangle-alert', '二次核对未完成', state.errorMessage || '先重新读取参数，确认前不要重复写入。', '重新核对', 'post-write-reread', '取消', 'close-modal'],
       'restore-unavailable': ['triangle-alert', '暂时无法恢复', state.errorMessage || '请先核对车辆与备份，再重新尝试。', '知道了', 'close-modal', '', ''],
+      'dump-complete': ['file-text', '寄存器快照', state.errorMessage || '快照已导出到本应用文档目录。', '我知道了', 'close-modal', '', ''],
       'diagnostic-exported': ['circle-check', '诊断已导出', state.errorMessage || '文件已写入本应用的文档目录。', '我知道了', 'close-modal', '', ''],
       'data-cleared': ['circle-check', '本机数据已清除', state.errorMessage || '配对凭据与备份已删除。', '我知道了', 'close-modal', '', ''],
       'clear-data-confirm': ['triangle-alert', '清除本机数据？', '将删除本机保存的配对凭据与参数备份。清除后需要重新配对才能使用，且无法找回备份。', '确认清除', 'clear-data-confirmed', '取消', 'close-modal'],

@@ -129,10 +129,19 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
     private var postWriteTimer: DispatchWorkItem?
     /// Where the last write was aimed, kept so the page's "re-check" button can
     /// re-run the verification without a new write.
-    private var lastPostWriteTarget: (profile: Int, disConfig: Int)?
+    private var lastPostWriteTarget: (profile: Int, disConfig: Int, isDashboard: Bool)?
     /// The payload of a write the user asked to retry, replayed only after a
     /// fresh read has been put back in front of them.
     private var pendingRetryRequest: String?
+
+    /// What a register sweep is for, so its result can be routed.
+    private enum DumpPurpose { case preWrite, postWrite, adaptation }
+    private var dumpPurpose: DumpPurpose?
+    /// The snapshot taken immediately before a write, which the write is
+    /// measured against afterwards.
+    private var preWriteDump: RegisterDump?
+    private var lastAdaptationDump: RegisterDump?
+    private var previousAdaptationDump: RegisterDump?
     private var gate: RiskGate?
     private var gateNonce = 0
     /// Meter gates accepted in this session, keyed by serial and target profile,
@@ -148,6 +157,7 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
         "firstBackupValid": false,
         "recentBackupValid": false,
         "disBackupValid": false,
+        "dumpReady": false,
         "disBackup": "未保存",
         "backupAlternativesDiffer": false,
         "firstBackup": "尚未建立",
@@ -255,6 +265,12 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
 
         case "export-diag":
             exportDiagnostics()
+
+        case "dump-registers":
+            startAdaptationDump()
+
+        case "compare-dump":
+            compareWithLastDump()
 
         case "clear-data":
             clearLocalData()
@@ -459,6 +475,84 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
         beginPreWriteRead()
     }
 
+    /// Takes the pre-write snapshot. Everything the write-time safety checks
+    /// need rides on it: the restore path, the static-table agreement test, and
+    /// the baseline for spotting changes the write was not meant to make.
+    private func beginPreWriteDump(_ pending: PendingWrite) {
+        preWriteDump = nil
+        dumpPurpose = .preWrite
+        let module = pending.isDashboard ? RegisterDump.dashboardModule
+                                         : RegisterDump.meterModule
+        state["busyMessage"] = "正在读取寄存器快照（写入前备份）…"
+        pushState()
+        startClient(record: placeholderRecord(serial: serial),
+                    operation: .dumpRegisters, dumpModules: [module])
+    }
+
+    private func handleDump(_ dump: RegisterDump, purpose: DumpPurpose) {
+        state["busyMessage"] = NSNull()
+        refreshBackupState(serial: serial)
+
+        switch purpose {
+        case .preWrite:
+            guard let pending = pendingWrite else { return }
+            let module = pending.isDashboard ? RegisterDump.dashboardModule
+                                             : RegisterDump.meterModule
+
+            // A module that did not read back completely is not backed up, and
+            // an incomplete backup is not a way back.
+            guard dump.isFullyReadable(module: module) else {
+                writeFailure("写入前未能完整读取该模块的全部寄存器，备份不完整，"
+                    + "本次没有发送写入指令。请保持车辆开机后重试。")
+                return
+            }
+
+            // The static table is an assumption about the firmware. If the
+            // vehicle contradicts it, writing from the table would put the
+            // wrong capacity on the vehicle — the failure that damages modules.
+            if !pending.isDashboard,
+               case .disagrees(let expected, let reported) = dump.agreement() {
+                writeFailure("车辆当前档位与容量表不一致（表 \(expected)mAh / 车 \(reported)mAh），"
+                    + "该表不适用于本车固件。照表写入会写错容量，已停止。"
+                    + "请导出寄存器快照用于适配本车型。")
+                return
+            }
+
+            preWriteDump = dump
+            pushState()
+            openGate()
+
+        case .adaptation:
+            // Routed to `saveAdaptationDump` before reaching here.
+            break
+
+        case .postWrite:
+            guard let before = preWriteDump, let check = lastPostWriteTarget else { return }
+            let changes = dump.changes(from: before)
+            let expectedModule = check.isDashboard ? RegisterDump.dashboardModule
+                                                   : RegisterDump.meterModule
+            let expectedIndex = check.isDashboard ? 0x92 : 0x00
+            let collateral = changes.filter {
+                !($0.module == expectedModule && $0.index == expectedIndex)
+            }
+            if collateral.isEmpty {
+                showWriteSuccess(capacityPending: false)
+                state["errorMessage"] = "写入后比对：除目标地址外无其他寄存器变化。"
+                pushState()
+            } else {
+                let list = collateral.prefix(8).map {
+                    String(format: "0x%02X/0x%02X %d→%d", $0.module, $0.index,
+                           $0.before, $0.after)
+                }.joined(separator: "；")
+                state["errorMessage"] = "⚠ 写入后检测到\(collateral.count)处目标之外的变化："
+                    + list + "。请导出寄存器快照并停止继续写入。"
+            }
+            state["modal"] = "write-success"
+            state["result"] = "success"
+            pushState()
+        }
+    }
+
     private func requestRestore(first: Bool) {
         let backup = first ? backupStore.firstBackup(serial: serial)
                            : backupStore.prewriteBackup(serial: serial)
@@ -484,13 +578,15 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
     private func startClient(record: DeviceRecord, operation: BfgBleClient.Operation,
                              targetProfile: Int = -1,
                              expectedDisConfigRaw: Int = -1,
-                             allowUnverifiedDis: Bool = false) {
+                             allowUnverifiedDis: Bool = false,
+                             dumpModules: [Int] = []) {
         client?.cancel()
         activeOperation = operation
         let newClient = BfgBleClient(record: record, operation: operation,
                                      targetProfile: targetProfile,
                                      expectedDisConfigRaw: expectedDisConfigRaw,
                                      allowUnverifiedDis: allowUnverifiedDis,
+                                     dumpModules: dumpModules,
                                      transport: CoreBluetoothTransport(),
                                      credentialStore: KeychainCredentialStore.shared,
                                      listener: self)
@@ -639,6 +735,67 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
         ]
         lines.append(contentsOf: diagnosticLog)
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// A deliberate, slow sweep of the whole reachable bus, for adapting the
+    /// tool to this vehicle rather than for guarding a write.
+    private func startAdaptationDump() {
+        // The versions live in the dashboard and centre modules, so those have
+        // to be included for the fingerprint to identify the build.
+        dumpPurpose = .adaptation
+        state["busyMessage"] = "正在读取寄存器快照（可能需要数分钟）…"
+        pushState()
+        startClient(record: placeholderRecord(serial: serial),
+                    operation: .dumpRegisters,
+                    dumpModules: [RegisterDump.dashboardModule, 0x09,
+                                  RegisterDump.meterModule])
+    }
+
+    private func saveAdaptationDump(_ dump: RegisterDump) {
+        previousAdaptationDump = lastAdaptationDump
+        lastAdaptationDump = dump
+        let name = "bfg-dump-\(dump.serial)-\(dump.timestamp).json"
+        let url = Self.documentsDirectory().appendingPathComponent(name)
+        do {
+            try dump.json().write(to: url, options: .atomic)
+            state["errorMessage"] = "\(name) · \(dump.entries.count) 个地址，"
+                + "\(dump.respondedCount) 个有响应 · 指纹 \(dump.fingerprint.identifier)"
+        } catch {
+            state["errorMessage"] = "快照写入失败：\(error.localizedDescription)"
+        }
+        state["dumpReady"] = true
+        state["modal"] = "dump-complete"
+        state["busyMessage"] = NSNull()
+        pushState()
+    }
+
+    /// Compares the latest sweep against the previous one. This is the check
+    /// that answers "did anything move that should not have".
+    private func compareWithLastDump() {
+        guard let latest = lastAdaptationDump else {
+            state["errorMessage"] = "还没有寄存器快照可对比，请先导出一次。"
+            state["modal"] = "dump-complete"
+            pushState()
+            return
+        }
+        guard let previous = previousAdaptationDump else {
+            state["errorMessage"] = "这是第一份快照，已作为基线。"
+            state["modal"] = "dump-complete"
+            pushState()
+            return
+        }
+        let changes = latest.changes(from: previous)
+        if changes.isEmpty {
+            state["errorMessage"] = "两份快照完全一致（\(latest.entries.count) 个地址）。"
+        } else {
+            let list = changes.prefix(10).map {
+                String(format: "0x%02X/0x%02X %d→%d",
+                       $0.module, $0.index, $0.before, $0.after)
+            }.joined(separator: "；")
+            state["errorMessage"] = "发现 \(changes.count) 处变化：\(list)"
+        }
+        state["modal"] = "dump-complete"
+        pushState()
     }
 
     private func clearLocalData() {
@@ -830,6 +987,16 @@ extension PrototypeCoordinator: BfgBleClient.Listener {
             return
         }
 
+        if let purpose = dumpPurpose, let dump = result.registerDump {
+            dumpPurpose = nil
+            if purpose == .adaptation {
+                saveAdaptationDump(dump)
+            } else {
+                handleDump(dump, purpose: purpose)
+            }
+            return
+        }
+
         // A retried write: the read is only there to put the confirmation back
         // in front of the user with current values.
         if let retry = pendingRetryRequest, pendingWrite == nil, !result.writeCommandSent {
@@ -945,7 +1112,7 @@ extension PrototypeCoordinator: BfgBleClient.Listener {
             }
             refreshBackupState(serial: result.serial)
             pushState()
-            openGate()
+            beginPreWriteDump(pending)
             return
         }
 
@@ -965,7 +1132,8 @@ extension PrototypeCoordinator: BfgBleClient.Listener {
         // The write's own read-back confirmed the value; the original still
         // waits and reads again, because a vehicle can lag on the remaining
         // capacity even after the profile has changed.
-        lastPostWriteTarget = (result.afterProfile, result.disConfigAfterRaw)
+        lastPostWriteTarget = (result.afterProfile, result.disConfigAfterRaw,
+                               activeOperation == .writeDisVoltage)
         postWriteCheck = PostWriteCheck(expectedProfile: result.afterProfile,
                                         expectedDisConfig: result.disConfigAfterRaw)
         goTo("post-write-check")
@@ -1012,6 +1180,24 @@ extension PrototypeCoordinator: BfgBleClient.Listener {
                                           profile: check.expectedProfile)
         }
         refreshBackupState(serial: result.serial)
+
+        // Final check: sweep the module again and confirm that the only thing
+        // that moved is the address that was written. Anything else changing is
+        // the clearest early sign that a write reached further than intended.
+        if preWriteDump != nil {
+            dumpPurpose = .postWrite
+            state["busyMessage"] = "正在比对写入后的寄存器快照…"
+            pushState()
+            let module = (lastPostWriteTarget?.isDashboard ?? false)
+                ? RegisterDump.dashboardModule : RegisterDump.meterModule
+            startClient(record: placeholderRecord(serial: serial),
+                        operation: .dumpRegisters, dumpModules: [module])
+            return
+        }
+        showWriteSuccess(capacityPending: pending)
+    }
+
+    private func showWriteSuccess(capacityPending pending: Bool) {
         state["result"] = "success"
         state["modal"] = "write-success"
         state["errorMessage"] = pending

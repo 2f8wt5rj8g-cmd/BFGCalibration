@@ -29,7 +29,10 @@ public final class VirtualVehicle {
         /// 32-byte password the vehicle holds; replaces the stub below when set.
         public var storedPassword32: [UInt8]?
 
-        public var profile = 0x31          // 60V / 26Ah
+        /// 0x51 is index 5 at 60V, which the profile table puts at 26000 —
+        /// profile and capacity have to agree or the read resolves as a
+        /// compatibility case instead of the normal path.
+        public var profile = 0x51
         public var soc = 76
         public var capacityMah = 26000
         public var dashboardVersion = 0x0259
@@ -324,7 +327,7 @@ public final class VirtualVehicle {
         // A real vehicle answers across its whole register space; silence is
         // the exception, and is modelled by `silentRegisters`. Answering the
         // rest keeps a 256-address sweep from taking three minutes.
-        case (0x01, _), (0x10, _):
+        case (0x01, _), (0x10, _), (0x04, _), (0x09, _):
             return le16(0)
         default:
             return nil
