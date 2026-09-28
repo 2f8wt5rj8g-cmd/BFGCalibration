@@ -578,6 +578,8 @@ globalThis.lucide = {createIcons() {
           <p class="nb-label">写入前快照是写入前的旧参数，不是本次选择的目标。恢复会重新连接并核对；备份不保证硬件异常后一定能恢复。</p>
           <button class="nb-secondary" style="margin-top:12px" type="button" data-action="restore-first" ${!state.firstBackupValid || state.readOnlyVehicle ? 'disabled' : ''}>恢复首次原参数</button>
           ${state.backupAlternativesDiffer ? `<button class="nb-secondary" style="margin-top:10px" type="button" data-action="restore-prewrite" ${!state.recentBackupValid || state.readOnlyVehicle ? 'disabled' : ''}>恢复最近写入前参数</button>` : ''}
+          <div class="nb-label" style="margin-top:12px">首次仪表配置</div><div class="nb-value" style="overflow-wrap:anywhere">${esc(state.disBackup || '未保存')}</div>
+          <button class="nb-secondary" style="margin-top:10px" type="button" data-action="restore-dis" ${!state.disBackupValid || state.readOnlyVehicle ? 'disabled' : ''}>恢复首次仪表配置</button>
         </section>
         <section class="nb-section"><div class="nb-section-head"><h3 class="nb-section-title">维护与说明</h3></div>
           <div class="nb-list"><button class="nb-list-item" type="button" data-action="export-diag"><div class="nb-grow"><div class="nb-value">导出最近一次诊断</div><div class="nb-label">仅在需要排查连接问题时使用</div></div>${icon('chevron-right')}</button>

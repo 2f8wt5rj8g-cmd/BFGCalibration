@@ -127,6 +127,12 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
     }
     private var postWriteCheck: PostWriteCheck?
     private var postWriteTimer: DispatchWorkItem?
+    /// Where the last write was aimed, kept so the page's "re-check" button can
+    /// re-run the verification without a new write.
+    private var lastPostWriteTarget: (profile: Int, disConfig: Int)?
+    /// The payload of a write the user asked to retry, replayed only after a
+    /// fresh read has been put back in front of them.
+    private var pendingRetryRequest: String?
     private var gate: RiskGate?
     private var gateNonce = 0
     /// Meter gates accepted in this session, keyed by serial and target profile,
@@ -141,6 +147,8 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
         "readOnlyVehicle": false,
         "firstBackupValid": false,
         "recentBackupValid": false,
+        "disBackupValid": false,
+        "disBackup": "未保存",
         "backupAlternativesDiffer": false,
         "firstBackup": "尚未建立",
         "recentBackup": "尚无写入前快照",
@@ -189,8 +197,11 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
         case "begin-pair":
             pair()
 
-        case "begin-connect", "refresh-read", "post-write-reread":
+        case "begin-connect", "refresh-read":
             refreshRead()
+
+        case "post-write-reread":
+            requestPostWriteReread()
 
         case "start-repair":
             pair()
@@ -204,8 +215,11 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
             scan(module: action == "scan-dis" ? RegisterReadPlan.dashboard
                                               : RegisterReadPlan.meter)
 
-        case "do-write", "retry-write":
+        case "do-write":
             requestWrite(value: value)
+
+        case "retry-write":
+            requestRetryWrite(value: value)
 
         case "confirm-unverified-dis":
             confirmUnverifiedDashboardWrite()
@@ -215,6 +229,9 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
 
         case "restore-prewrite":
             requestRestore(first: false)
+
+        case "restore-dis":
+            requestDashboardRestore()
 
         case "write-gate-confirm":
             confirmGate(value: value)
@@ -376,6 +393,70 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
         state["writeStage"] = "precheck"
         pushState()
         startClient(record: placeholderRecord(serial: serial), operation: .compareRead)
+    }
+
+    /// The page's "try again" after a failed write.
+    ///
+    /// The original re-reads and then puts the confirmation back in front of the
+    /// user, rather than writing again on the strength of the earlier choice.
+    private func requestRetryWrite(value: String) {
+        pendingRetryRequest = value
+        goTo("connect-progress")
+        startClient(record: placeholderRecord(serial: serial), operation: .compareRead)
+    }
+
+    /// Re-runs the post-write verification against the previous write's target.
+    /// Reads only — this never re-sends the write.
+    private func requestPostWriteReread() {
+        guard let target = lastPostWriteTarget else {
+            refreshRead()
+            return
+        }
+        postWriteCheck = PostWriteCheck(expectedProfile: target.profile,
+                                        expectedDisConfig: target.disConfig)
+        goTo("post-write-check")
+        startClient(record: placeholderRecord(serial: serial), operation: .compareRead)
+    }
+
+    /// Restores the dashboard's original `0x92` bytes.
+    ///
+    /// Kept separate from the meter restore because the dashboard encoding is
+    /// independent of the BFG profile, and the original refuses to touch it when
+    /// the stored bytes belong to a different config family — writing them would
+    /// change a value whose meaning it cannot confirm.
+    private func requestDashboardRestore() {
+        guard !WriteAccessPolicy.isReadOnlySerial(serial) else {
+            state["errorMessage"] = "该序列号以 N 开头，仅允许读取，不发送任何写入指令。"
+            state["modal"] = "restore-unavailable"
+            pushState()
+            return
+        }
+        let stored = backupStore.disConfigBackup(serial: serial)
+        guard DisVoltageConfig.nominalVoltage(stored) >= 0 else {
+            state["errorMessage"] = "没有首次仪表配置备份，请先连接车辆读取。"
+            state["modal"] = "restore-unavailable"
+            pushState()
+            return
+        }
+        guard let read = lastRead else {
+            state["errorMessage"] = "请先连接并读取车辆数据。"
+            state["modal"] = "restore-unavailable"
+            pushState()
+            return
+        }
+        guard (stored & 0xF0) == (read.disConfigRaw & 0xF0) else {
+            state["errorMessage"] = "当前仪表配置与首次备份不属于同一组，已停止自动恢复。"
+            state["modal"] = "restore-unavailable"
+            pushState()
+            return
+        }
+        pendingWrite = PendingWrite(isDashboard: true,
+                                    voltage: DisVoltageConfig.nominalVoltage(stored),
+                                    capacityMah: 0,
+                                    profile: -1,
+                                    restoreLabel: "首次仪表配置",
+                                    expectedDisConfigRaw: read.disConfigRaw)
+        beginPreWriteRead()
     }
 
     private func requestRestore(first: Bool) {
@@ -749,6 +830,25 @@ extension PrototypeCoordinator: BfgBleClient.Listener {
             return
         }
 
+        // A retried write: the read is only there to put the confirmation back
+        // in front of the user with current values.
+        if let retry = pendingRetryRequest, pendingWrite == nil, !result.writeCommandSent {
+            pendingRetryRequest = nil
+            lastRead = result
+            if let request = Self.parseWriteRequest(retry) {
+                state["writeType"] = request.type
+                state["voltage"] = request.voltage
+                state["capacity"] = Double(request.capacityMah) / 1000
+            }
+            state["result"] = NSNull()
+            state["errorMessage"] = ""
+            state["busyMessage"] = NSNull()
+            state["screen"] = "write"
+            state["modal"] = "write-confirm"
+            pushState()
+            return
+        }
+
         lastRead = result
         state["connected"] = true
         state["vehicleSn"] = result.serial
@@ -865,6 +965,7 @@ extension PrototypeCoordinator: BfgBleClient.Listener {
         // The write's own read-back confirmed the value; the original still
         // waits and reads again, because a vehicle can lag on the remaining
         // capacity even after the profile has changed.
+        lastPostWriteTarget = (result.afterProfile, result.disConfigAfterRaw)
         postWriteCheck = PostWriteCheck(expectedProfile: result.afterProfile,
                                         expectedDisConfig: result.disConfigAfterRaw)
         goTo("post-write-check")
@@ -947,6 +1048,11 @@ extension PrototypeCoordinator: BfgBleClient.Listener {
         state["backupAlternativesDiffer"] = backupStore.alternativesDiffer(serial: serial)
         state["firstBackup"] = first.description
         state["recentBackup"] = recent.description
+        let disBackup = backupStore.disConfigBackup(serial: serial)
+        state["disBackupValid"] = DisVoltageConfig.nominalVoltage(disBackup) >= 0
+        state["disBackup"] = DisVoltageConfig.nominalVoltage(disBackup) >= 0
+            ? "\(DisVoltageConfig.nominalVoltage(disBackup))V · 0x" + String(disBackup, radix: 16).uppercased()
+            : "未保存"
         state["readOnlyVehicle"] = WriteAccessPolicy.isReadOnlySerial(serial)
         let confirmed = backupStore.lastConfirmedProfile(serial: serial)
         state["lastConfirmedTarget"] = confirmed < 0
