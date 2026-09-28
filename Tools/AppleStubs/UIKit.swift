@@ -8,6 +8,8 @@ open class UIView {
     public init(frame: CGRect) {}
     public init() {}
     open var isOpaque: Bool = true
+    open var bounds: CGRect = .zero
+    open var frame: CGRect = .zero
 }
 
 open class UIScrollView: UIView {

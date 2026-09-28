@@ -36,6 +36,15 @@ extension View {
 
 public struct UIViewRepresentableContext<Representable> {}
 
+public struct ProposedViewSize {
+    public var width: CGFloat?
+    public var height: CGFloat?
+    public init(width: CGFloat? = nil, height: CGFloat? = nil) {
+        self.width = width
+        self.height = height
+    }
+}
+
 public protocol UIViewRepresentable: View {
     associatedtype UIViewType: UIView
     associatedtype Coordinator
@@ -43,6 +52,13 @@ public protocol UIViewRepresentable: View {
     func makeCoordinator() -> Coordinator
     func makeUIView(context: Context) -> UIViewType
     func updateUIView(_ uiView: UIViewType, context: Context)
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UIViewType,
+                      context: Context) -> CGSize?
+}
+
+extension UIViewRepresentable {
+    public func sizeThatFits(_ proposal: ProposedViewSize, uiView: UIViewType,
+                             context: Context) -> CGSize? { nil }
 }
 
 extension UIViewRepresentable {

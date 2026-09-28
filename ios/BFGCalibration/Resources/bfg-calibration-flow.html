@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"></head><body>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover"></head><body>
 <div id="bfg-ui-prototype">
   <div class="nb-stage">
     <div class="nb-preview-nav" aria-label="快速查看页面">
@@ -118,7 +118,9 @@
     align-items: center;
     gap: 12px;
     min-height: 66px;
-    padding: 12px 18px;
+    /* Top inset keeps the title clear of the notch / Dynamic Island.
+       Without viewport-fit=cover in the viewport meta this resolves to 0. */
+    padding: max(12px, env(safe-area-inset-top, 0px)) 18px 12px;
     background: var(--nb-bg);
   }
   #bfg-ui-prototype .nb-header-copy { min-width: 0; flex: 1; }
@@ -185,7 +187,9 @@
   }
   #bfg-ui-prototype .nb-tip svg { width: 17px; height: 17px; flex: 0 0 17px; margin-top: 1px; }
   #bfg-ui-prototype .nb-bottom-nav {
-    min-height: 66px; display: grid; grid-template-columns: repeat(3, 1fr); padding: 7px 14px 10px;
+    min-height: 66px; display: grid; grid-template-columns: repeat(3, 1fr);
+    /* Bottom inset keeps the tab bar clear of the home indicator. */
+    padding: 7px 14px max(10px, env(safe-area-inset-bottom, 0px));
     border-top: 1px solid var(--nb-line); background: var(--nb-surface);
   }
   #bfg-ui-prototype .nb-bottom-nav button {

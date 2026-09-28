@@ -6,8 +6,11 @@ struct BFGCalibrationApp: App {
 
     var body: some Scene {
         WindowGroup {
+            // All edges are ignored so the page reaches the physical screen;
+            // the HTML insets itself with env(safe-area-inset-*) against the
+            // notch and the home indicator.
             PrototypeWebView(coordinator: coordinatorHost.coordinator)
-                .ignoresSafeArea(.container, edges: .bottom)
+                .ignoresSafeArea()
         }
     }
 }

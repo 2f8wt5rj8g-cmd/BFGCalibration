@@ -40,6 +40,15 @@ struct PrototypeWebView: UIViewRepresentable {
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) { }
+
+    /// Declaring the size explicitly stops SwiftUI from sizing the representable
+    /// to the web view's intrinsic content size, which can show the page in a
+    /// band rather than filling the window.
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: WKWebView,
+                      context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? uiView.bounds.width,
+               height: proposal.height ?? uiView.bounds.height)
+    }
 }
 
 /// Receives `BfgNative.action(...)` calls, drives the BLE client, and pushes
