@@ -1,6 +1,8 @@
 import Foundation
 import SwiftUI
-import WebKit
+// WebKit has not yet been fully annotated for Swift concurrency, so importing
+// it without this produces a Sendable-related warning on every build.
+@preconcurrency import WebKit
 import BFGCore
 
 /// Hosts the existing `bfg-calibration-flow.html` in a WKWebView.
