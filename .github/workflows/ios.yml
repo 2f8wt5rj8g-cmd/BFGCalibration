@@ -59,6 +59,25 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate --spec ios/project.yml
 
+      # XcodeGen's `info:` key regenerates the plist at the given path and drops
+      # any key not restated under `info.properties`. That silently removed
+      # UILaunchScreen (iOS then renders the app letterboxed, i.e. not full
+      # screen) and NSBluetoothAlwaysUsageDescription (iOS terminates the app on
+      # first CoreBluetooth call without it). Assert the keys survive so this
+      # cannot regress unnoticed.
+      - name: Assert Info.plist keys survived generation
+        run: |
+          set -euo pipefail
+          PLIST=ios/BFGCalibration/Info.plist
+          for key in UILaunchScreen NSBluetoothAlwaysUsageDescription UIBackgroundModes; do
+            if /usr/libexec/PlistBuddy -c "Print :$key" "$PLIST" >/dev/null 2>&1; then
+              echo "ok   $key"
+            else
+              echo "::error::$key is missing from $PLIST"
+              exit 1
+            fi
+          done
+
       # Unsigned build. This is the artefact to hand to a local signing tool
       # when no signing secrets are configured.
       - name: Build (unsigned)
@@ -73,6 +92,21 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             build
+
+      # Assert against the built artefact, not just the source file: this is
+      # what actually ships.
+      - name: Assert built app Info.plist
+        run: |
+          set -euo pipefail
+          PLIST=build/Build/Products/Release-iphoneos/BFGCalibration.app/Info.plist
+          for key in UILaunchScreen NSBluetoothAlwaysUsageDescription; do
+            if /usr/libexec/PlistBuddy -c "Print :$key" "$PLIST" >/dev/null 2>&1; then
+              echo "ok   $key"
+            else
+              echo "::error::$key missing from the built app"
+              exit 1
+            fi
+          done
 
       - name: Package unsigned app
         run: |

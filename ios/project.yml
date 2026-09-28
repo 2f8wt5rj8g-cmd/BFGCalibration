@@ -11,8 +11,11 @@ name: BFGCalibration
 
 options:
   bundleIdPrefix: com.bfgtools.calibration
+  # iOS 16 is required by UIViewRepresentable.sizeThatFits(_:uiView:context:),
+  # which takes a ProposedViewSize. That overload is what lets the web view be
+  # sized to the window rather than to its own content.
   deploymentTarget:
-    iOS: "15.0"
+    iOS: "16.0"
   createIntermediateGroups: true
 
 packages:
