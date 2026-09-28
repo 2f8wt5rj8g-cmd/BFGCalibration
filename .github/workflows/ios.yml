@@ -39,8 +39,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode.app
+      # XcodeGen emits a project in a recent object format, which an older
+      # default Xcode refuses to open ("future Xcode project file format").
+      # Picking the newest installed Xcode avoids pinning the repository to
+      # whatever the runner happens to default to.
+      - name: Select newest available Xcode
+        run: |
+          set -euo pipefail
+          echo "Installed Xcode versions:"
+          ls -d /Applications/Xcode*.app
+          XCODE_PATH=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "Selecting $XCODE_PATH"
+          sudo xcode-select -s "$XCODE_PATH"
+          xcodebuild -version
 
       - name: Install XcodeGen
         run: brew install xcodegen
