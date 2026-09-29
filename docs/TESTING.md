@@ -21,6 +21,24 @@ Tools/typecheck-ios.sh
 
 ---
 
+## 第 0.5 层：页面 ⇄ 原生契约（秒级，无需设备）
+
+```bash
+Tools/check-ui-wiring.py
+```
+
+两件事：机械比对四组动作集合（页面声明 / JS 本地处理 / 发往原生 / 原生 case 分支），
+再在无头 Chrome 里驱动真实页面、**通过原生同一通道**（`screen` / `modal-state`）
+断言导航与弹窗行为。含一条对照组，证明测试确实抓得到该类缺陷。
+
+**能抓到**：死按钮（声明了却从不发送）、导航被原生状态覆盖、已关闭的弹窗复活
+**抓不到**：真机 WebView 差异、原生侧的实际 BLE 行为
+
+> 实际战绩：抓出三个死按钮（`dump-registers` / `compare-dump` / `restore-dis`）
+> 和一处导航循环（首页点不进去）。这类缺陷编译不报、单测不报、截图看不出。
+
+---
+
 ## 第 1 层：核心逻辑单测（秒级）
 
 ```bash
@@ -143,6 +161,8 @@ curl -s "https://api.github.com/repos/QL2007na-hue/BFGCalibration/actions/runs?p
 | 同上 | iOS 传输层恒用 `.withResponse` 写入，而原版按 TX 特征属性优先选无应答写入；属性不符时 CoreBluetooth 会拒发整帧 | 已修：按属性选型（`BleWritePolicy`） |
 | 状态与报错有时不更新 | 编排层在 BLE 队列上改 `state` 并调用主线程专属的 `WKWebView.evaluateJavaScript` | 已修：所有回调切主线程 |
 | 未配对时去做只读扫描，报「AUTH无回复」 | 车端已有密钥槽、本机无凭据，AUTH 必然失败，但提示指向了车辆 | 已修：提前提示「请先配对」 |
+| 关掉提示后点首页／关于声明，又被弹回同一页，首页点不进去 | 原生把 `screen`/`modal`/`errorMessage`/`result`/`writeGate` 当持久状态，每次推送都重发一遍，覆盖了页面自己的导航与弹窗关闭 | 已修：五个字段改为一次性指令（`pushState` 发送后即清） |
+| 「导出寄存器快照」「与上次快照对比」「恢复首次仪表配置」点了没反应 | 页面声明了动作，但点击处理链没有分支、从不发往原生（死按钮）。原生的处理分支一直存在 | 已修：补接线；快照另加进度页（原先全程停在设置页零反馈） |
 
 ---
 
@@ -157,10 +177,13 @@ Tools/typecheck-ios.sh
 # 2. 核心单测
 swift test
 
-# 3. UI 渲染（看截图）
+# 3. 界面渲染（看截图）
 Tools/render-screens.sh
 
-# 4. 推到 GitHub 看 CI 绿灯
+# 4. 页面↔原生契约（改过 HTML 或编排层就一定要跑）
+Tools/check-ui-wiring.py
+
+# 5. 推到 GitHub 看 CI 绿灯
 git push
 ```
 

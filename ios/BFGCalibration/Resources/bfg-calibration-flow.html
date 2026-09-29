@@ -978,7 +978,17 @@ globalThis.lucide = {createIcons() {
     else if (action === 'clear-data') { state.modal = 'clear-data-confirm'; render(); save(); }
     else if (action === 'clear-data-confirmed') { state.modal = null; render(); save(); if (window.BfgNative) nativeAction('clear-data'); }
     else if (action === 'export-diag' || action === 'show-license'
-             || action === 'restore-first' || action === 'restore-prewrite') { if (window.BfgNative) nativeAction(action); }
+             || action === 'restore-first' || action === 'restore-prewrite'
+             || action === 'restore-dis' || action === 'compare-dump') { if (window.BfgNative) nativeAction(action); }
+    else if (action === 'dump-registers') {
+      // A full sweep runs each address twice, so it takes minutes. Staying on
+      // the settings page for that long looks exactly like a dead button, so
+      // borrow the scan progress screen — it already has the ring, the caption
+      // and a cancel button that stops the client.
+      state.scanModule = '寄存器快照'; state.scanReplies = 0; state.scanTimeouts = 0;
+      go('scan-progress');
+      if (window.BfgNative) nativeAction(action);
+    }
     else if (action === 'scan-dis' || action === 'scan-bfg') { state.scanModule = action === 'scan-dis' ? '仪表盘' : '计量模块'; state.errorMessage = ''; state.scanReplies = 0; state.scanTimeouts = 0; go('scan-progress'); if (window.BfgNative) nativeAction(action); }
     else if (action === 'cancel-scan') { if (window.BfgNative) nativeAction('cancel'); go('settings'); }
     else if (action === 'show-dashboard-requirements') { state.modal = 'dashboard-requirements'; render(); }

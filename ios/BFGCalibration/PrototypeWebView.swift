@@ -180,9 +180,24 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
 
     // MARK: - Native -> JS
 
+    /// Sends the current state to the page.
+    ///
+    /// The keys below are **directives to the page, not state this side owns**:
+    /// the page's own `go()` and `close-modal` clear `screen` and `modal`, and it
+    /// reports navigation back through `screen` / `modal-state`. Keeping a copy
+    /// here means the *next* push — a bare status update is enough — re-sends it,
+    /// which drags the rider back to a page they already left, or re-opens a
+    /// dialog they just closed. On the settings screen that made every
+    /// navigation bounce back and the home button unreachable.
+    ///
+    /// So each directive is sent exactly once and then dropped from the state.
+    static let oneShotKeys = ["screen", "modal", "errorMessage", "result", "writeGate"]
+
     private func pushState() {
         guard pageReady, let webView else { return }
-        guard let data = try? JSONSerialization.data(withJSONObject: state),
+        let payload = state
+        for key in Self.oneShotKeys { state[key] = NSNull() }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
               let json = String(data: data, encoding: .utf8) else { return }
         webView.evaluateJavaScript("window.bfgNativeUpdate && window.bfgNativeUpdate(\(json));")
     }
@@ -282,7 +297,10 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
             openSystemSettings()
 
         case "screen", "modal-state", "select-vehicle":
-            // Purely presentational; the page already handled it locally.
+            // Purely presentational, and the page already handled it locally.
+            // `screen`/`modal-state` are the page reporting its own navigation
+            // back; nothing needs to be kept in sync, because `pushState()`
+            // sends those as one-shot directives rather than holding them.
             break
 
         default:

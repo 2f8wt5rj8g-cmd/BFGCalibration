@@ -43,6 +43,7 @@ docs/                    设计与签名文档
 | 加密 / 协议 / 策略 | ✅ 92 个测试通过（AES 用 NIST 向量，SHA-1 用 RFC 3174 向量） |
 | 帧格式 | ✅ 字节级断言 |
 | iOS 应用层 | ✅ **类型检查通过**（`Tools/typecheck-ios.sh`）；行为验证在 CI 的 macOS runner |
+| 页面 ⇄ 原生契约 | ✅ **通过**（`Tools/check-ui-wiring.py`）：动作接线 + 无头浏览器交互断言 |
 | 真机 BLE | ❌ 未验证，需真车 + 真机 |
 
 ### 在 Linux 上做 iOS 类型检查
