@@ -668,7 +668,7 @@ globalThis.lucide = {createIcons() {
     return `<div class="nb-page">
       ${header(progress ? '正在只读扫描' : '扫描结果', esc(state.scanModule || '车辆寄存器'), true)}
       <main class="nb-content nb-center">
-        ${progress ? '<div class="nb-progress-ring" role="progressbar" aria-label="寄存器扫描中"></div>' : `<div class="nb-hero-check">${icon('circle-check')}</div>`}
+        ${progress ? '<div class="nb-progress-ring" role="progressbar" aria-label="寄存器扫描中"></div>' : `<div class="nb-hero-check">${icon(state.errorMessage ? 'triangle-alert' : 'circle-check')}</div>`}
         <h2 class="nb-title">${progress ? esc(state.busyMessage || '正在连接车辆并读取寄存器') : (state.errorMessage ? '扫描未完成' : '只读扫描完成')}</h2>
         <p>${progress ? '仅发送读取命令。请保持车辆开机并靠近手机，随时可以取消。' : (state.errorMessage ? esc(state.errorMessage) : `收到 ${state.scanReplies} 个寄存器响应，${state.scanTimeouts} 个地址未回复。请在开始下一次扫描前导出本次日志。`)}</p>
         <section class="nb-section"><button class="nb-primary" type="button" data-action="${progress ? 'cancel-scan' : 'export-diag'}">${progress ? '取消扫描' : '导出扫描日志'}</button>
@@ -871,6 +871,10 @@ globalThis.lucide = {createIcons() {
       'bluetooth-off': ['bluetooth', '蓝牙尚未开启', state.errorMessage || '请打开系统蓝牙后返回重试。', '打开蓝牙设置', 'open-bluetooth-settings', '稍后', 'close-modal'],
       'permission-needed': ['shield-alert', '需要蓝牙相关权限', state.errorMessage || '请允许位置和附近设备权限后重试。', '我知道了', 'close-modal', '', ''],
       'auth-repair': ['key-round', '车辆认证没有回应', state.errorMessage || '检查其他应用或手机是否占用车辆蓝牙，然后重试。', state.screen === 'pair-ready' ? '重新尝试配对' : '重试连接', state.screen === 'pair-ready' ? 'begin-pair' : 'retry-connect', '稍后', 'close-modal'],
+      // The one dialog that must always be reachable: whatever the native side
+      // reports back goes here verbatim, so a failed attempt is never a spinner
+      // with no reason attached.
+      'operation-failed': ['triangle-alert', '操作未完成', state.errorMessage || '请检查车辆电源与蓝牙后重试。', '我知道了', 'close-modal', '', ''],
       'write-success': ['circle-check', '写入成功，二次核对完成', state.errorMessage || '已重新读取车辆参数。恢复原参数请到“设置 → 参数备份与恢复”。', '查看车辆信息', 'close-modal', '去设置恢复', 'settings'],
       'write-failure': ['circle-x', '写入未完成', state.errorMessage || '请重新读取当前参数，再决定是否重试。', '再次尝试', 'retry-write', '取消', 'close-modal'],
       'verification-incomplete': ['triangle-alert', '二次核对未完成', state.errorMessage || '先重新读取参数，确认前不要重复写入。', '重新核对', 'post-write-reread', '取消', 'close-modal'],

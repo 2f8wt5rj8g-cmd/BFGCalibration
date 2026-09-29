@@ -37,6 +37,11 @@ public final class BfgBleClient: NSObject {
         func bleClient(didFailWith message: String)
     }
 
+    /// Failure text for a central that reports Bluetooth as unavailable. The
+    /// host compares against it to offer the system Bluetooth settings, so it is
+    /// a shared constant rather than a string written twice.
+    public static let bluetoothOffMessage = "系统蓝牙未开启"
+
     public final class Result {
         public var serial = ""
         public var profileRaw = -1
@@ -223,6 +228,12 @@ public final class BfgBleClient: NSObject {
 
     // MARK: - Lifecycle
 
+    /// Operations that authenticate with a credential this app stored earlier.
+    /// Pairing negotiates a fresh one, and discovery never authenticates at all.
+    private var needsStoredCredential: Bool {
+        operation != .pairAndRead && operation != .discoverVehicles
+    }
+
     public func start() {
         do {
             if WriteAccessPolicy.isReadOnlySerial(record.effectiveSn), operation != .readOnly,
@@ -236,6 +247,22 @@ public final class BfgBleClient: NSObject {
             let stored = operation == .pairAndRead
                 ? nil
                 : credentialStore.load(serial: record.effectiveSn)
+
+            // The original always had a fallback password: it could read one out
+            // of the Ninebot database. The Keychain entry this app's own pairing
+            // wrote is the only source here, and without it AUTH cannot succeed —
+            // the vehicle only answers once the handshake proves we hold the key.
+            // Failing here says which of the two it is; failing later reads as
+            // "AUTH无回复" and sends the rider looking at the vehicle instead of
+            // at the missing pairing.
+            if needsStoredCredential, stored == nil {
+                throw NSError(domain: "bfg", code: 12, userInfo: [NSLocalizedDescriptionKey:
+                    record.effectiveSn.isEmpty
+                        ? "尚未选择车辆。请先完成一次配对，或在设置中选择已配对的车辆。"
+                        : "本机没有这辆车的配对凭据（未配对，或凭据已失效）。"
+                          + "请先在设置中完成「临时密钥配对」，之后才能读取或写入。"])
+            }
+
             // The store keeps the full 32-byte pairing password; the session key
             // is derived from its first half only. The original truncates here
             // with `Arrays.copyOf(locallyPaired, 16)`; passing all 32 through
@@ -245,12 +272,15 @@ public final class BfgBleClient: NSObject {
             // CBCentralManager starts in `.unknown` and only reports
             // `.poweredOn` asynchronously. Treating that initial state as
             // "Bluetooth is off" would fail every first launch, so the scan
-            // waits for the delegate callback instead.
+            // waits for the delegate callback instead — but not indefinitely: a
+            // state report that never arrives would otherwise leave the page
+            // spinning with nothing to show for it.
             if transport.isPoweredOn {
                 beginScan()
             } else {
                 awaitingCentralState = true
                 status("正在等待蓝牙就绪…")
+                timeout(.idle, 6, "系统没有报告蓝牙状态。请确认蓝牙已开启、本应用已获蓝牙权限，然后重试。")
             }
         } catch {
             fail(describe(error))
@@ -1310,11 +1340,12 @@ extension BfgBleClient: BleTransportDelegate {
         if poweredOn {
             if awaitingCentralState {
                 awaitingCentralState = false
+                clearTimeout()
                 beginScan()
             }
         } else if awaitingCentralState || state == .scanning {
             awaitingCentralState = false
-            fail("系统蓝牙未开启")
+            fail(BfgBleClient.bluetoothOffMessage)
         }
     }
 
@@ -1446,6 +1477,12 @@ extension BfgBleClient: BleTransportDelegate {
 
     public func bleTransport(didWrite error: Error?) {
         onQueue { [weak self] in self?.handleWriteResult(error) }
+    }
+
+    /// Transport facts (negotiated write length, write type, write outcomes)
+    /// folded into the same log the rider exports after a failed attempt.
+    public func bleTransport(log line: String) {
+        onQueue { [weak self] in self?.log(line) }
     }
 
     /// The vehicle advertises its 14-character serial as the BLE local name.

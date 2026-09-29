@@ -47,7 +47,7 @@
 
 | 层 | 状态 | 依据 |
 |---|---|---|
-| 加密 / 协议 / 策略 | ✅ **已验证** | 67 个测试在 Linux 上通过；AES 用 NIST FIPS-197 与 SP 800-38A 向量，SHA-1 用 RFC 3174 与 FIPS 180-4 向量 |
+| 加密 / 协议 / 策略 | ✅ **已验证** | 92 个测试在 Linux 上通过；AES 用 NIST FIPS-197 与 SP 800-38A 向量，SHA-1 用 RFC 3174 与 FIPS 180-4 向量 |
 | 帧格式 | ✅ **已验证** | 字节级断言，与 Android 逐字段比对 |
 | iOS App 层（CoreBluetooth / WKWebView / Keychain） | ⚠️ **仅编译验证** | 本机无 macOS，无法编译。由 GitHub Actions 的 macOS runner 编译 |
 | 真机 BLE 通信 | ❌ **未验证** | 需要真车 + 真机，无法用任何自动化手段替代 |
@@ -212,7 +212,7 @@ window.BfgNative = { action: (a, b) =>
 ## 10. 剩余工作
 
 已完成：
-- [x] 核心层移植 + 67 个测试在 Linux 通过
+- [x] 核心层移植 + 92 个测试在 Linux 通过
 - [x] 帧层移植 + 字节级测试
 - [x] iOS 层代码（CoreBluetooth / WKWebView / Keychain）
 - [x] XcodeGen 工程配置 + CI 流水线（macOS runner 上零警告通过）

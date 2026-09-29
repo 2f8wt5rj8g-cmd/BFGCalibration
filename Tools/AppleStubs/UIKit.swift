@@ -15,3 +15,9 @@ open class UIView {
 open class UIScrollView: UIView {
     open var bounces: Bool = true
 }
+
+open class UIApplication {
+    public static let shared = UIApplication()
+    public static let openSettingsURLString = "app-settings:"
+    open func open(_ url: URL) {}
+}

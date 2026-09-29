@@ -27,7 +27,7 @@ Tools/typecheck-ios.sh
 swift test
 ```
 
-67 个测试：加密（NIST/RFC 标准向量）、帧格式（字节级）、写入风控策略、通信模式识别、容量解析。
+92 个测试：加密（NIST/RFC 标准向量）、帧格式（字节级）、写入风控策略、通信模式识别、容量解析、写入类型选型与配对前置校验。
 
 **能抓到**：协议逻辑错误、加密实现错误
 **抓不到**：BLE 传输、UI、构建配置
@@ -131,9 +131,18 @@ curl -s "https://api.github.com/repos/QL2007na-hue/BFGCalibration/actions/runs?p
 
 ### 出问题时抓什么
 
-- **App 侧**：`PrototypeCoordinator.bleClient(didLog:)` 的记录（目前只在内存，需要时可加持久化）
+- **首选：App 内的「设置 → 导出诊断」**。落盘到「文件」App 的 BFGCalibration 目录，含连接状态、服务与特征发现、TX 特征的写入属性、协商写入长度、选用的写入类型、每次写入的结果、每次收包长度，以及协议层日志。**真车上失败时这个文件是唯一能定位断点的证据**，比 Xcode 控制台更全。
 - **日志**：Xcode → Window → Devices and Simulators → 选设备 → Open Console
 - **对照**：Android 版在同一台车上的行为是最强参照
+
+### 已踩过的坑（真机实测记录）
+
+| 现象 | 原因 | 状态 |
+|---|---|---|
+| 配对时车端毫无反应，手机一直转圈且不给原因 | 失败时只写 `errorMessage`、不离开进度页也不弹窗，页面永远停在转圈并回落到兜底文案 | 已修：失败一律路由到终止页/弹窗 |
+| 同上 | iOS 传输层恒用 `.withResponse` 写入，而原版按 TX 特征属性优先选无应答写入；属性不符时 CoreBluetooth 会拒发整帧 | 已修：按属性选型（`BleWritePolicy`） |
+| 状态与报错有时不更新 | 编排层在 BLE 队列上改 `state` 并调用主线程专属的 `WKWebView.evaluateJavaScript` | 已修：所有回调切主线程 |
+| 未配对时去做只读扫描，报「AUTH无回复」 | 车端已有密钥槽、本机无凭据，AUTH 必然失败，但提示指向了车辆 | 已修：提前提示「请先配对」 |
 
 ---
 

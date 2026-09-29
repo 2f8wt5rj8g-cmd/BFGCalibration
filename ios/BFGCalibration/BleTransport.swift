@@ -20,6 +20,11 @@ import BFGCore
 ///     expected to happen in the foreground.
 /// CoreBluetooth conformer to `BFGCore.BleTransport`, so the state machine
 /// can be driven by a simulated vehicle in tests.
+///
+/// Every callback and every write runs on `queue`. The state machine calls in
+/// from its own queue, so `write` hops across rather than sharing its chunk
+/// buffer — two queues touching one `pending` array is how a frame gets half
+/// sent.
 final class CoreBluetoothTransport: NSObject, BFGCore.BleTransport {
     static let serviceUUID = CBUUID(string: "6e400001-b5a3-f393-e0a9-e50e24dcca9e")
     static let txUUID = CBUUID(string: "6e400002-b5a3-f393-e0a9-e50e24dcca9e")
@@ -35,20 +40,41 @@ final class CoreBluetoothTransport: NSObject, BFGCore.BleTransport {
     private var txCharacteristic: CBCharacteristic?
 
     private let queue = DispatchQueue(label: "com.bfgtools.calibration.ble")
+    private var poweredOn = false
+    private var connected = false
+
+    /// The write type the discovered characteristic actually supports. Resolved
+    /// once, when the characteristic is discovered, and never guessed: see
+    /// `BleWritePolicy` for why hard-coding this breaks a working vehicle.
+    private var writeType: BleWriteType?
+    /// Frames are split at the negotiated limit and then drained one at a time.
+    /// Bluetooth allows one acknowledged write in flight, and a without-response
+    /// write only when the radio's buffer has room, so the tail of a long frame
+    /// is dropped if it is handed over all at once.
+    private var pending: [Data] = []
+    private var writeInFlight = false
 
     override init() {
         super.init()
         central = CBCentralManager(delegate: self, queue: queue)
     }
 
-    var isPoweredOn: Bool { central.state == .poweredOn }
-
-    var maximumWriteLength: Int {
-        // Without a connected peripheral, fall back to the guaranteed minimum
-        // packet size rather than guessing at a negotiated value.
-        guard let peripheral else { return 20 }
-        return peripheral.maximumWriteValueLength(for: .withResponse)
+    var isPoweredOn: Bool {
+        queue.sync { poweredOn }
     }
+
+    /// The largest chunk the platform will accept for the write type in use.
+    /// Before the characteristic is known there is no negotiated value to
+    /// report, so the guaranteed minimum is used.
+    private func writeLimit() -> Int {
+        guard let peripheral else { return 20 }
+        switch writeType ?? .withResponse {
+        case .withResponse: return peripheral.maximumWriteValueLength(for: .withResponse)
+        case .withoutResponse: return peripheral.maximumWriteValueLength(for: .withoutResponse)
+        }
+    }
+
+    private func log(_ line: String) { delegate?.bleTransport(log: line) }
 
     func startScan() {
         guard central.state == .poweredOn else { return }
@@ -61,65 +87,133 @@ final class CoreBluetoothTransport: NSObject, BFGCore.BleTransport {
     }
 
     func connect(identifier: String) {
-        guard let peripheral = scanned[identifier] else { return }
-        self.peripheral = peripheral
-        peripheral.delegate = self
-        central.connect(peripheral, options: nil)
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard let peripheral = self.scanned[identifier] else {
+                // Waiting out the client's connect timeout would hide the one
+                // thing worth knowing: this identifier is not in the scan cache.
+                self.log("BLE_CONNECT_FAILED 未在扫描结果中找到该车辆")
+                self.delegate?.bleTransport(didDisconnect: BleError.deviceNotFound)
+                return
+            }
+            self.peripheral = peripheral
+            peripheral.delegate = self
+            self.central.connect(peripheral, options: nil)
+        }
     }
 
     func disconnect() {
-        if let peripheral {
-            central.cancelPeripheralConnection(peripheral)
+        queue.async { [weak self] in
+            guard let self else { return }
+            if let peripheral = self.peripheral {
+                self.central.cancelPeripheralConnection(peripheral)
+            }
+            self.peripheral = nil
+            self.txCharacteristic = nil
+            self.writeType = nil
+            self.pending = []
+            self.writeInFlight = false
+            self.connected = false
         }
-        peripheral = nil
-        txCharacteristic = nil
     }
 
-    /// Writes in chunks bounded by the negotiated limit. The Ninebot frames in
-    /// use are well under the iOS minimum of 20 bytes, but the guard keeps a
-    /// future larger frame from being silently truncated by CoreBluetooth.
+    /// Queues a frame. The transport splits it at the negotiated limit and sends
+    /// the pieces in order, each waiting for the previous one to be accepted.
     func write(_ data: Data) {
-        guard let peripheral, let txCharacteristic else { return }
-        let limit = maximumWriteLength
-        var offset = 0
-        while offset < data.count {
-            let end = min(offset + limit, data.count)
-            let chunk = data.subdata(in: offset..<end)
-            peripheral.writeValue(chunk, for: txCharacteristic, type: .withResponse)
-            offset = end
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard self.connected, self.peripheral != nil else {
+                self.delegate?.bleTransport(didWrite: BleError.txNotReady)
+                return
+            }
+            guard self.txCharacteristic != nil, self.writeType != nil else {
+                self.delegate?.bleTransport(didWrite: BleError.txNotReady)
+                return
+            }
+            let limit = max(1, self.writeLimit())
+            var offset = 0
+            while offset < data.count {
+                let end = min(offset + limit, data.count)
+                self.pending.append(data.subdata(in: offset..<end))
+                offset = end
+            }
+            self.pump()
+        }
+    }
+
+    /// Sends what is queued as far as the platform currently allows.
+    private func pump() {
+        guard connected, let peripheral, let tx = txCharacteristic, let writeType else {
+            return
+        }
+        while !pending.isEmpty {
+            switch writeType {
+            case .withResponse:
+                // One acknowledged write at a time; `didWriteValueFor` resumes.
+                guard !writeInFlight else { return }
+                let chunk = pending.removeFirst()
+                writeInFlight = true
+                log("BLE_TX len=\(chunk.count) type=withResponse")
+                peripheral.writeValue(chunk, for: tx, type: .withResponse)
+
+            case .withoutResponse:
+                // No callback acknowledges these, so the only back-pressure
+                // signal is the radio itself.
+                guard peripheral.canSendWriteWithoutResponse else {
+                    queue.asyncAfter(deadline: .now() + 0.02) { [weak self] in self?.pump() }
+                    return
+                }
+                let chunk = pending.removeFirst()
+                log("BLE_TX len=\(chunk.count) type=withoutResponse")
+                peripheral.writeValue(chunk, for: tx, type: .withoutResponse)
+            }
         }
     }
 }
 
 extension CoreBluetoothTransport: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        delegate?.bleTransportDidUpdateState(poweredOn: central.state == .poweredOn)
+        poweredOn = central.state == .poweredOn
+        log("BLE_STATE poweredOn=\(poweredOn) raw=\(central.state.rawValue)")
+        delegate?.bleTransportDidUpdateState(poweredOn: poweredOn)
     }
 
     func centralManager(_ central: CBCentralManager,
                         didDiscover peripheral: CBPeripheral,
                         advertisementData: [String: Any],
                         rssi RSSI: NSNumber) {
-        let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
-            ?? peripheral.name
-            ?? ""
+        let localName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
+        let name = localName ?? peripheral.name ?? ""
         scanned[peripheral.identifier.uuidString] = peripheral
+        // Whether the serial arrives as the local name or only as the cached
+        // device name decides if pairing can find the vehicle at all.
+        log("BLE_DISCOVER name=\(name.isEmpty ? "(空)" : name) "
+            + "localName=\(localName == nil ? "无" : "有") rssi=\(RSSI)")
         delegate?.bleTransport(didDiscover: peripheral.identifier.uuidString, name: name)
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        connected = true
+        log("BLE_CONNECTED name=\(peripheral.name ?? "(空)")")
         delegate?.bleTransportDidConnect()
         peripheral.discoverServices([CoreBluetoothTransport.serviceUUID])
     }
 
     func centralManager(_ central: CBCentralManager,
                         didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        connected = false
+        log("BLE_CONNECT_FAILED \(error.map { "err=\($0.localizedDescription)" } ?? "err=nil")")
         delegate?.bleTransport(didDisconnect: error)
     }
 
     func centralManager(_ central: CBCentralManager,
                         didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        connected = false
         txCharacteristic = nil
+        writeType = nil
+        pending = []
+        writeInFlight = false
+        log("BLE_DISCONNECTED \(error.map { "err=\($0.localizedDescription)" } ?? "err=nil")")
         delegate?.bleTransport(didDisconnect: error)
     }
 }
@@ -127,48 +221,85 @@ extension CoreBluetoothTransport: CBCentralManagerDelegate {
 extension CoreBluetoothTransport: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         guard error == nil else {
+            log("BLE_SERVICES err=\(error!.localizedDescription)")
             delegate?.bleTransport(didDiscoverServices: error)
             return
         }
         guard let service = peripheral.services?.first(where: { $0.uuid == CoreBluetoothTransport.serviceUUID })
         else {
+            log("BLE_SERVICES 未找到 6E400001")
             delegate?.bleTransport(didDiscoverServices: BleError.serviceNotFound)
             return
         }
+        log("BLE_SERVICES ok")
         peripheral.discoverCharacteristics([CoreBluetoothTransport.txUUID, CoreBluetoothTransport.rxUUID], for: service)
     }
 
     func peripheral(_ peripheral: CBPeripheral,
                     didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         guard error == nil else {
+            log("BLE_CHARS err=\(error!.localizedDescription)")
             delegate?.bleTransport(didDiscoverServices: error)
             return
         }
         guard let tx = service.characteristics?.first(where: { $0.uuid == CoreBluetoothTransport.txUUID }),
               let rx = service.characteristics?.first(where: { $0.uuid == CoreBluetoothTransport.rxUUID })
         else {
+            log("BLE_CHARS 缺少 0002/0003 特征")
             delegate?.bleTransport(didDiscoverServices: BleError.characteristicNotFound)
             return
         }
+
+        let properties = tx.properties
+        let supportsWrite = properties.contains(.write)
+        let supportsWriteWithoutResponse = properties.contains(.writeWithoutResponse)
+        // The single most useful line in this file: it records what the vehicle
+        // actually advertises, and which write type was chosen from it.
+        log("BLE_CHARS props=\(properties.rawValue) write=\(supportsWrite) "
+            + "writeNoRsp=\(supportsWriteWithoutResponse) "
+            + "notify=\(rx.properties.contains(.notify))")
+
+        writeType = BleWritePolicy.writeType(supportsWrite: supportsWrite,
+                                             supportsWriteWithoutResponse: supportsWriteWithoutResponse)
+        guard writeType != nil else {
+            log("BLE_CHARS 写入特征不可写")
+            delegate?.bleTransport(didWrite: BleError.writeNotPermitted)
+            return
+        }
+
         txCharacteristic = tx
+        log("BLE_WRITE_LIMIT withResponse=\(peripheral.maximumWriteValueLength(for: .withResponse)) "
+            + "withoutResponse=\(peripheral.maximumWriteValueLength(for: .withoutResponse)) "
+            + "chosen=\(writeType!.label)")
         // Android wrote the CCCD descriptor by hand; iOS does it here.
         peripheral.setNotifyValue(true, for: rx)
     }
 
     func peripheral(_ peripheral: CBPeripheral,
                     didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+        log("BLE_NOTIFY \(error.map { "err=\($0.localizedDescription)" } ?? "ok")")
         delegate?.bleTransport(didUpdateNotificationState: error)
     }
 
     func peripheral(_ peripheral: CBPeripheral,
                     didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-        guard error == nil, let data = characteristic.value else { return }
+        let data = characteristic.value
+        log("BLE_RX len=\(data?.count ?? 0) "
+            + (error.map { "err=\($0.localizedDescription)" } ?? "err=nil"))
+        guard error == nil, let data else { return }
         delegate?.bleTransport(didReceive: data)
     }
 
     func peripheral(_ peripheral: CBPeripheral,
                     didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        writeInFlight = false
+        if let error {
+            log("BLE_TX_FAIL err=\(error.localizedDescription)")
+            pending = []
+        } else {
+            log("BLE_TX_OK")
+            pump()
+        }
         delegate?.bleTransport(didWrite: error)
     }
 }
-

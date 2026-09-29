@@ -1,5 +1,8 @@
 import Foundation
 import SwiftUI
+// Only for `UIApplication.openSettingsURLString`, which the Bluetooth-off prompt
+// needs; SwiftUI does not re-export it.
+import UIKit
 // WebKit has not yet been fully annotated for Swift concurrency, so importing
 // it without this produces a Sendable-related warning on every build.
 @preconcurrency import WebKit
@@ -275,7 +278,10 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
         case "clear-data":
             clearLocalData()
 
-        case "screen", "modal-state", "select-vehicle", "open-bluetooth-settings":
+        case "open-bluetooth-settings":
+            openSystemSettings()
+
+        case "screen", "modal-state", "select-vehicle":
             // Purely presentational; the page already handled it locally.
             break
 
@@ -285,6 +291,14 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
             // call still arrives.
             break
         }
+    }
+
+    /// The page's "打开蓝牙设置" button, and the only way out of the Bluetooth-off
+    /// dialog. iOS has no URL that reaches the Bluetooth pane directly, so this
+    /// opens the app's own settings, one tap from there.
+    private func openSystemSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
     }
 
     // MARK: - Vehicle discovery
@@ -951,23 +965,44 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
 // MARK: - BLE listener
 
 extension PrototypeCoordinator: BfgBleClient.Listener {
-    func bleClient(didUpdateStatus status: String) {
+    /// Every listener callback arrives on the client's own BLE queue, but `state`
+    /// and WKWebView are main-thread-only. Delivering them in place meant the
+    /// page could be updated — and `state` mutated — from a background queue,
+    /// which is how a status line or a failure notice goes missing and leaves
+    /// the page showing a fallback caption instead. Each callback hops first.
+    func bleClient(didUpdateStatus status: String) { onMain { self.handleStatus(status) } }
+
+    func bleClient(didLog line: String) { onMain { self.handleLog(line) } }
+
+    func bleClient(didFinish result: BfgBleClient.Result) { onMain { self.handleFinish(result) } }
+
+    func bleClient(didFailWith message: String) { onMain { self.handleFailure(message) } }
+
+    /// Runs `work` on the main thread, without a second hop when already there.
+    private func onMain(_ work: @escaping () -> Void) {
+        if Thread.isMainThread { work() } else { DispatchQueue.main.async(execute: work) }
+    }
+
+    private func handleStatus(_ status: String) {
         state["busyMessage"] = status
         pushState()
     }
 
-    func bleClient(didLog line: String) {
+    private func handleLog(_ line: String) {
         // Surfaced through the page's log area when present.
         state["logLine"] = line
         // Bounded so a long session cannot grow without limit; the tail is the
-        // part that matters when something went wrong.
+        // part that matters when something went wrong. The bound is generous
+        // because the BLE transport logs one line per write and per received
+        // frame: those lines are the only evidence a real vehicle leaves behind,
+        // and a truncated log is the same as no log when the break is early.
         diagnosticLog.append(line)
-        if diagnosticLog.count > 500 {
-            diagnosticLog.removeFirst(diagnosticLog.count - 500)
+        if diagnosticLog.count > 4000 {
+            diagnosticLog.removeFirst(diagnosticLog.count - 4000)
         }
     }
 
-    func bleClient(didFinish result: BfgBleClient.Result) {
+    private func handleFinish(_ result: BfgBleClient.Result) {
         state["pairScanning"] = false
 
         if activeOperation == .discoverVehicles {
@@ -1218,11 +1253,61 @@ extension PrototypeCoordinator: BfgBleClient.Listener {
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: item)
     }
 
-    func bleClient(didFailWith message: String) {
+    private func handleFailure(_ message: String) {
+        // Read before the teardown below: which step of a multi-step flow died
+        // decides where the rider has to land to see it.
+        let failedPostWriteCheck = postWriteCheck != nil
+        let wasWriting = pendingWrite != nil
+
         state["errorMessage"] = message
         state["busyMessage"] = NSNull()
+        state["pairScanning"] = false
         pendingWrite = nil
+        pendingUnverified = nil
         gate = nil
+        // A parked post-write check must not outlive the attempt: a stale one
+        // would make the next plain read look like a verification pass.
+        postWriteCheck = nil
+        postWriteTimer?.cancel()
+        postWriteTimer = nil
+
+        // Leaving the progress screen is the point of this handler. A progress
+        // screen renders a spinner and a fallback caption and nothing else, so a
+        // failure that only writes `errorMessage` looks like an operation still
+        // running — the rider sees "正在连接车辆并读取寄存器" forever and the
+        // reason it stopped is never displayed anywhere.
+        if wasWriting {
+            writeFailure(message)
+            return
+        }
+        if failedPostWriteCheck {
+            state["screen"] = "post-write-check"
+            state["modal"] = "verification-incomplete"
+            pushState()
+            return
+        }
+        if message == BfgBleClient.bluetoothOffMessage {
+            state["screen"] = "home"
+            state["modal"] = "bluetooth-off"
+            pushState()
+            return
+        }
+        switch activeOperation {
+        case .registerScan:
+            // The scan result screen prints the message verbatim and offers the
+            // log export, which is what a failed sweep needs.
+            state["screen"] = "scan-result"
+            state["modal"] = NSNull()
+        case .dumpRegisters:
+            state["screen"] = "settings"
+            state["modal"] = "dump-complete"
+        case .pairAndRead:
+            state["screen"] = "pair-ready"
+            state["modal"] = "operation-failed"
+        case .readOnly, .compareRead, .discoverVehicles, .writeProfile, .writeDisVoltage:
+            state["screen"] = "home"
+            state["modal"] = "operation-failed"
+        }
         pushState()
     }
 

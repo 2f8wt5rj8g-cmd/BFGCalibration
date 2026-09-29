@@ -13,9 +13,27 @@ open class CBService: NSObject {
     open var characteristics: [CBCharacteristic]?
 }
 
+public struct CBCharacteristicProperties: OptionSet, Sendable {
+    public let rawValue: UInt
+    public init(rawValue: UInt) { self.rawValue = rawValue }
+
+    public static let broadcast = CBCharacteristicProperties(rawValue: 0x01)
+    public static let read = CBCharacteristicProperties(rawValue: 0x02)
+    public static let writeWithoutResponse = CBCharacteristicProperties(rawValue: 0x04)
+    public static let write = CBCharacteristicProperties(rawValue: 0x08)
+    public static let notify = CBCharacteristicProperties(rawValue: 0x10)
+    public static let indicate = CBCharacteristicProperties(rawValue: 0x20)
+    public static let authenticatedSignedWrites = CBCharacteristicProperties(rawValue: 0x40)
+    public static let extendedProperties = CBCharacteristicProperties(rawValue: 0x80)
+}
+
 open class CBCharacteristic: NSObject {
     open var uuid: CBUUID = CBUUID(string: "")
     open var value: Data?
+    /// What the characteristic permits. The transport picks its write type from
+    /// this instead of assuming one, so the stub has to model it.
+    open var properties: CBCharacteristicProperties = []
+    open var isNotifying: Bool = false
 }
 
 public enum CBManagerState: Int, Sendable {
@@ -31,6 +49,8 @@ open class CBPeripheral: CBPeer {
     open var name: String?
     open weak var delegate: CBPeripheralDelegate?
     open var services: [CBService]?
+    /// Whether a without-response write fits in the radio's buffer right now.
+    open var canSendWriteWithoutResponse: Bool = true
 
     open func discoverServices(_ serviceUUIDs: [CBUUID]?) {}
     open func discoverCharacteristics(_ characteristicUUIDs: [CBUUID]?, for service: CBService) {}
