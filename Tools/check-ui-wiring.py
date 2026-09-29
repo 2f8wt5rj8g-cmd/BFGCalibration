@@ -76,6 +76,19 @@ def part1_contract_diff(html, swift):
     else:
         print("  ✓ 页面发出的动作原生都有分支")
 
+    # A modal the native side raises but the page has no entry for renders
+    # nothing at all — the dialog is simply invisible, which is how a failure
+    # notice once became a dead button.
+    native_modals = set(re.findall(r'state\["modal"\] = "([a-z-]+)"', swift))
+    page_modals = set(re.findall(r"'([a-z-]+)': \[", html))
+    custom_modals = {"wake", "write-confirm", "write-gate", "dashboard-requirements",
+                     "missing-vehicle", "license"}
+    missing = sorted(native_modals - page_modals - custom_modals)
+    if missing:
+        fail("原生会弹出、但页面没有定义的弹窗：" + ", ".join(missing))
+    else:
+        print(f"  ✓ {len(native_modals)} 个原生弹窗在页面上都有定义")
+
     return not failures
 
 
@@ -135,6 +148,17 @@ window.addEventListener('load', function () {
     ok('恢复首次仪表配置发往原生', sent('restore-dis'), '');
     click('[data-action="restore-first"]');
     ok('恢复首次原参数发往原生', sent('restore-first'), '');
+
+    // 写入越界告警：文案要在，且首要动作是"导出快照"而不是"重试"
+    update({ modal: 'write-collateral', screen: 'review',
+             errorMessage: '⚠ 写入后检测到 2 处目标之外的寄存器变化。' });
+    ok('越界告警弹窗出现', last('modal-state') === 'open', String(last('modal-state')));
+    ok('越界告警不复用"写入成功"文案',
+       document.body.innerText.indexOf('写入成功') === -1, '');
+    ok('越界告警首要动作是导出快照',
+       !!document.querySelector('.nb-modal [data-action="dump-registers"]'), '');
+    click('[data-action="close-modal"]');
+    window.bfgNativeGo('settings');   // 声明按钮在设置页，先回去
 
     // 声明弹窗打开时不改变当前页面，关闭后不复活
     click('[data-action="show-license"]');

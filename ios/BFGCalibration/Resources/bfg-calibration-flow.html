@@ -533,7 +533,7 @@ globalThis.lucide = {createIcons() {
       ${header('选择车辆', '核对序列号后再继续', true)}
       <main class="nb-content">
         <div class="nb-alert warning">${icon('shield-alert')}<span>仅配对本人拥有或已获授权的车辆。</span></div>
-        ${state.pairScanning ? `<div class="nb-card nb-section" role="status" aria-live="polite" style="display:flex;align-items:center;gap:14px"><div class="nb-progress-ring" style="width:28px;height:28px;flex:0 0 28px;border-width:3px;margin:0" aria-label="正在扫描"></div><div><div class="nb-value">正在搜索附近车辆</div><div class="nb-label">约 ${state.pairScanSeconds} 秒后结束 · 已找到 ${state.vehicles.length} 台</div></div></div>` : ''}
+        ${state.pairScanning ? `<div class="nb-card nb-section" role="status" aria-live="polite" style="display:flex;align-items:center;gap:14px"><div class="nb-progress-ring" style="width:28px;height:28px;flex:0 0 28px;border-width:3px;margin:0" aria-label="正在扫描"></div><div><div class="nb-value">正在搜索附近车辆</div><div class="nb-label">${state.pairScanSeconds > 0 ? `约 ${state.pairScanSeconds} 秒后结束 · ` : ''}已找到 ${state.vehicles.length} 台</div></div></div>` : ''}
         ${state.errorMessage ? `<div class="nb-alert danger nb-section">${icon('circle-x')}<span>${esc(state.errorMessage)}</span></div>` : ''}
         <section class="nb-section">
           <div class="nb-section-head"><h3 class="nb-section-title">附近车辆</h3><p class="nb-section-note">已找到 ${state.vehicles.length} 台</p></div>
@@ -689,7 +689,7 @@ globalThis.lucide = {createIcons() {
         ${resultBanner}
         <section class="nb-card ${resultBanner ? 'nb-section' : ''}">
           <div class="nb-vehicle-card" style="padding:0;border:0;background:transparent">
-            <div class="nb-vehicle-icon">${icon('bike')}</div><div class="nb-grow"><div class="nb-value">${esc(maskedSn)}</div><div class="nb-label">${esc(state.vehicleModel)} · 蓝牙已连接</div></div><span class="nb-badge">${icon('bluetooth')}已连接</span>
+            <div class="nb-vehicle-icon">${icon('bike')}</div><div class="nb-grow"><div class="nb-value">${esc(maskedSn)}</div><div class="nb-label">${state.vehicleModel ? esc(state.vehicleModel) + ' · ' : ''}蓝牙已连接</div></div><span class="nb-badge">${icon('bluetooth')}已连接</span>
           </div>
           <div class="nb-hero-metrics nb-section">
             ${socRing(state.soc)}
@@ -877,6 +877,9 @@ globalThis.lucide = {createIcons() {
       'operation-failed': ['triangle-alert', '操作未完成', state.errorMessage || '请检查车辆电源与蓝牙后重试。', '我知道了', 'close-modal', '', ''],
       'write-success': ['circle-check', '写入成功，二次核对完成', state.errorMessage || '已重新读取车辆参数。恢复原参数请到“设置 → 参数备份与恢复”。', '查看车辆信息', 'close-modal', '去设置恢复', 'settings'],
       'write-failure': ['circle-x', '写入未完成', state.errorMessage || '请重新读取当前参数，再决定是否重试。', '再次尝试', 'retry-write', '取消', 'close-modal'],
+      // Not a success under any wording: the target landed, but other registers
+      // moved too. The primary action is the evidence-gathering one, not a retry.
+      'write-collateral': ['triangle-alert', '写入波及超出预期', state.errorMessage || '检测到目标地址之外的寄存器变化。请导出寄存器快照，并在查明原因前停止继续写入。', '导出寄存器快照', 'dump-registers', '我知道了', 'close-modal'],
       'verification-incomplete': ['triangle-alert', '二次核对未完成', state.errorMessage || '先重新读取参数，确认前不要重复写入。', '重新核对', 'post-write-reread', '取消', 'close-modal'],
       'restore-unavailable': ['triangle-alert', '暂时无法恢复', state.errorMessage || '请先核对车辆与备份，再重新尝试。', '知道了', 'close-modal', '', ''],
       'dump-complete': ['file-text', '寄存器快照', state.errorMessage || '快照已导出到本应用文档目录。', '我知道了', 'close-modal', '', ''],

@@ -110,6 +110,15 @@ public final class BackupStore {
                time: int64Value(serial, Suffix.prewriteTime))
     }
 
+    /// The dashboard config as it stood immediately before the last write, or -1.
+    ///
+    /// Distinct from `disConfigBackup`, which is the *original* value captured
+    /// once and never overwritten: this one is replaced on every write, so it is
+    /// the value a dashboard write would have to put back.
+    public func prewriteDisConfig(serial: String) -> Int {
+        intValue(serial, Suffix.prewriteDis92)
+    }
+
     /// Records the parameters as they were immediately before a write.
     ///
     /// Returns `false` when the snapshot could not be persisted and read back

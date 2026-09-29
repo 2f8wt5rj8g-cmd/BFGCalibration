@@ -56,6 +56,29 @@ final class BackupStoreTests: XCTestCase {
         XCTAssertEqual(-1, store.disConfigBackup(serial: serial))
     }
 
+    /// A dashboard write has to be able to put back what it is about to replace,
+    /// which is the value captured immediately before *this* write — not the
+    /// original captured once at the beginning. The two must not be confused.
+    func testPrewriteDashboardConfigIsSeparateFromTheOriginal() {
+        store.saveDisConfigBackupIfAbsent(serial: serial, raw: 0xC2)
+        XCTAssertTrue(store.savePrewriteSnapshot(serial: serial, profile: 0x51,
+                                                 capacity: 26000, disConfigRaw: 0xD2))
+        XCTAssertEqual(0xC2, store.disConfigBackup(serial: serial),
+                       "原始仪表配置只写一次，不该被覆盖")
+        XCTAssertEqual(0xD2, store.prewriteDisConfig(serial: serial),
+                       "写前仪表配置应当是最近一次写前快照里的值")
+
+        // The next write replaces the pre-write value but still not the original.
+        XCTAssertTrue(store.savePrewriteSnapshot(serial: serial, profile: 0x52,
+                                                 capacity: 26000, disConfigRaw: 0xD1))
+        XCTAssertEqual(0xD1, store.prewriteDisConfig(serial: serial))
+        XCTAssertEqual(0xC2, store.disConfigBackup(serial: serial))
+    }
+
+    func testPrewriteDashboardConfigIsAbsentUntilASnapshotIsTaken() {
+        XCTAssertEqual(-1, store.prewriteDisConfig(serial: serial))
+    }
+
     func testPrewriteSnapshotReplacesThePreviousOne() {
         XCTAssertTrue(store.savePrewriteSnapshot(serial: serial, profile: 0x31,
                                                  capacity: 26000, disConfigRaw: 0xC2))

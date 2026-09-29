@@ -97,7 +97,21 @@ public final class BfgBleClient: NSObject {
         /// combination reports no capacity rather than a misleading raw value.
         public var displayBeforeCapacity: Int {
             if resolvedBeforeCapacityRaw >= 0 { return resolvedBeforeCapacityRaw }
-            return mode == .unsupported ? -1 : bfgCapacity
+            guard mode == .unsupported else { return bfgCapacity }
+            // An unrecognised firmware still reports its own capacity. Withholding
+            // it says less than showing it labelled for what it is: the number
+            // comes from the vehicle, and only its interpretation is unconfirmed.
+            // Nothing about the write gate changes — an unsupported combination
+            // still refuses to write.
+            if CapacityCompatibilityResolver.isPlausible(scannedCapacity) { return scannedCapacity }
+            return CapacityCompatibilityResolver.isPlausible(bfgCapacity) ? bfgCapacity : -1
+        }
+
+        /// True when `displayBeforeCapacity` is the vehicle's own figure on a
+        /// combination the tool could not resolve. The page labels it rather than
+        /// presenting it as a confirmed reading.
+        public var capacityIsUnverified: Bool {
+            mode == .unsupported && resolvedBeforeCapacityRaw < 0 && displayBeforeCapacity > 0
         }
         /// Counterpart of `displayBeforeCapacity` for a completed write: the
         /// value the vehicle reported back, or nothing when the combination was
@@ -196,8 +210,10 @@ public final class BfgBleClient: NSObject {
     private var dumpFirstPass: [String: Int] = [:]
     private var dumpEntries: [RegisterDump.Entry] = []
 
-    /// How long the vehicle list scans before reporting what it found.
-    private static let discoveryWindow: Double = 8
+    /// How long the vehicle list scans before reporting what it found. Public so
+    /// the host can show the rider the same countdown it is actually waiting on,
+    /// instead of a number of its own.
+    public static let discoveryWindow: Double = 8
     /// Vehicles seen during a `.discoverVehicles` scan, de-duplicated by the
     /// peripheral identifier iOS assigns.
     private var discoveredVehicles: [(serial: String, identifier: String)] = []
@@ -931,7 +947,11 @@ public final class BfgBleClient: NSObject {
         let expected = BfgProfileCatalog.expectedCore(result.profileRaw)
         let capacityInvalid = !CapacityCompatibilityResolver.isPlausible(result.bfgCapacity)
             || (expected > 0 && result.bfgCapacity != expected)
-        return !knownMeter || capacityInvalid
+        // `expected <= 0` means the table does not recognise this profile byte at
+        // all — the case where the repeated probes are the *only* way to learn
+        // what the vehicle actually holds. The resolver does not need the table
+        // for that (its strongest evidence is agreement between 0x0E and 0x0F).
+        return !knownMeter || capacityInvalid || expected <= 0
     }
 
     private func beginCapacityCompatibilityScan() {

@@ -111,6 +111,9 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
     private var activeOperation: BfgBleClient.Operation = .readOnly
     /// Retained for the diagnostic export; the page only ever shows the last line.
     private var diagnosticLog: [String] = []
+    /// Ticks the pairing screen's "seconds remaining" figure while a scan runs.
+    private var scanCountdown: DispatchWorkItem?
+    private var scanSecondsLeft = 0
 
     /// Result of the last completed read, which every write is derived from.
     private var lastRead: BfgBleClient.Result?
@@ -326,6 +329,39 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
         state["pairScanning"] = true
         pushState()
         startClient(record: placeholderRecord(serial: ""), operation: .discoverVehicles)
+        startScanCountdown()
+    }
+
+    /// Drives the "约 N 秒后结束" figure on the pairing screen from the same
+    /// window the client is actually scanning for. Without it the page sat on a
+    /// hard 0 for the whole scan.
+    private func startScanCountdown() {
+        stopScanCountdown()
+        scanSecondsLeft = Int(BfgBleClient.discoveryWindow)
+        state["pairScanSeconds"] = scanSecondsLeft
+        pushState()
+        tickScanCountdown()
+    }
+
+    private func tickScanCountdown() {
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.scanSecondsLeft = max(0, self.scanSecondsLeft - 1)
+            self.state["pairScanSeconds"] = self.scanSecondsLeft
+            self.pushState()
+            if self.scanSecondsLeft > 0 {
+                self.tickScanCountdown()
+            } else {
+                self.scanCountdown = nil
+            }
+        }
+        scanCountdown = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: item)
+    }
+
+    private func stopScanCountdown() {
+        scanCountdown?.cancel()
+        scanCountdown = nil
     }
 
     // MARK: - BLE operations
@@ -568,6 +604,15 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
                 !($0.module == expectedModule && $0.index == expectedIndex)
             }
             if collateral.isEmpty {
+                // Only a clean comparison earns the "confirmed" record: the sweep
+                // exists to catch a write that reached further than intended, and
+                // a target that landed alongside collateral damage is not a
+                // successful write.
+                if let target = lastPostWriteTarget, target.profile >= 0 {
+                    backupStore.saveLastConfirmed(serial: dump.serial,
+                                                  profile: target.profile)
+                }
+                refreshBackupState(serial: dump.serial)
                 showWriteSuccess(capacityPending: false)
                 state["errorMessage"] = "写入后比对：除目标地址外无其他寄存器变化。"
                 pushState()
@@ -576,12 +621,17 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
                     String(format: "0x%02X/0x%02X %d→%d", $0.module, $0.index,
                            $0.before, $0.after)
                 }.joined(separator: "；")
-                state["errorMessage"] = "⚠ 写入后检测到\(collateral.count)处目标之外的变化："
-                    + list + "。请导出寄存器快照并停止继续写入。"
+                state["errorMessage"] = "⚠ 写入后检测到\(collateral.count)处目标之外的寄存器变化："
+                    + list + "。这说明本次写入波及了预期之外的地址，"
+                    + "请立即导出寄存器快照，并在查明原因前停止继续写入。"
+                // Deliberately not `write-success`: this is the earliest signal
+                // that the write reached further than intended, and it used to be
+                // presented under a success dialog.
+                state["screen"] = "review"
+                state["result"] = NSNull()
+                state["modal"] = "write-collateral"
+                pushState()
             }
-            state["modal"] = "write-success"
-            state["result"] = "success"
-            pushState()
         }
     }
 
@@ -652,6 +702,18 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
             guard snapshot.valid,
                   snapshot.profile == lastRead?.profileRaw,
                   snapshot.capacity == lastRead?.displayBeforeCapacity else {
+                writeFailure("本次写入前备份未能核实，没有发送写入指令。"
+                    + "请重新连接并读取车辆。")
+                return
+            }
+        } else {
+            // The dashboard gets the same treatment. What a restore would have to
+            // put back is the 0x92 config captured immediately before this write,
+            // so it must be present and still agree with the vehicle's reading —
+            // otherwise there is no way back and nothing is sent.
+            guard let current = lastRead?.disConfigRaw, current >= 0,
+                  DisVoltageConfig.nominalVoltage(current) >= 0,
+                  backupStore.prewriteDisConfig(serial: serial) == current else {
                 writeFailure("本次写入前备份未能核实，没有发送写入指令。"
                     + "请重新连接并读取车辆。")
                 return
@@ -795,7 +857,10 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
         } catch {
             state["errorMessage"] = "快照写入失败：\(error.localizedDescription)"
         }
-        state["dumpReady"] = true
+        // Only a *second* dump gives the compare button something to say. Leaving
+        // this true forever both outlived a vehicle change and offered a
+        // comparison whose only possible answer was "这是第一份快照".
+        state["dumpReady"] = previousAdaptationDump != nil
         state["modal"] = "dump-complete"
         state["busyMessage"] = NSNull()
         pushState()
@@ -836,6 +901,12 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
         lastRead = nil
         pendingWrite = nil
         pendingUnverified = nil
+        // The in-memory snapshots go too: keeping them would leave the compare
+        // button offering a comparison against data the rider just asked to
+        // forget, for the same reason the stored backups are dropped.
+        lastAdaptationDump = nil
+        previousAdaptationDump = nil
+        state["dumpReady"] = false
         state["vehicles"] = []
         state["connected"] = false
         state["errorMessage"] = "已清除本机保存的配对凭据与备份。再次使用需要重新配对。"
@@ -948,7 +1019,12 @@ final class PrototypeCoordinator: NSObject, WKScriptMessageHandler, WKNavigation
                 + BackupStore.Backup.formatCapacity(pending.capacityMah)
             content["critical"] = verb == "写入"
                 ? "断电后可能恢复原参数。写入可能失败或造成数据显示异常，备份不保证恢复。"
-                : "恢复会把车辆参数写回所选备份。写入可能失败或造成数据显示异常，备份不保证恢复。"
+                // A restore is the same write to the same place; targeting an
+                // older value does not make it safer, so the wording carries the
+                // same weight as the dashboard path rather than less.
+                : "恢复同样是把参数写进车辆，不会因为目标是较早的参数而更安全。"
+                  + "写入可能失败，或造成车辆无法启动、仪表显示异常、计量模块损坏；"
+                  + "即使已备份原参数，也可能无法恢复。"
             content["acknowledgement"] = "我已核对车辆与目标参数，并了解上述风险"
             content["action"] = "继续写入"
         }
@@ -1022,6 +1098,7 @@ extension PrototypeCoordinator: BfgBleClient.Listener {
 
     private func handleFinish(_ result: BfgBleClient.Result) {
         state["pairScanning"] = false
+        stopScanCountdown()
 
         if activeOperation == .discoverVehicles {
             state["vehicles"] = result.discoveredVehicles.map {
@@ -1081,8 +1158,13 @@ extension PrototypeCoordinator: BfgBleClient.Listener {
         // After a write the meaningful figures are the post-write ones; showing
         // the pre-write values would make a successful write look like a no-op.
         let wrote = result.writeCommandSent
-        state["meterCapacity"] = DisplayFormatter.capacityShort(
-            wrote ? result.displayAfterCapacity : result.displayBeforeCapacity)
+        let meterCapacity = wrote ? result.displayAfterCapacity : result.displayBeforeCapacity
+        // On a firmware the tool could not resolve, the figure still comes from
+        // the vehicle — only its meaning is unconfirmed. Say so rather than
+        // presenting it as a verified reading.
+        state["meterCapacity"] = result.capacityIsUnverified
+            ? DisplayFormatter.capacityShort(meterCapacity) + "（未验证）"
+            : DisplayFormatter.capacityShort(meterCapacity)
         state["dashboardCapacity"] = DisplayFormatter.capacityShort(result.disRemainingCapacity)
         state["remainingCapacity"] = DisplayFormatter.capacityShort(result.disRemainingCapacity)
         state["meterFirmware"] = DisplayFormatter.firmwareVersion(result.meterFirmware)
@@ -1118,9 +1200,10 @@ extension PrototypeCoordinator: BfgBleClient.Listener {
         state["busyMessage"] = NSNull()
         refreshBackupState(serial: result.serial)
 
-        if result.profileReadbackVerified || result.disConfigReadbackVerified {
-            backupStore.saveLastConfirmed(serial: result.serial, profile: result.afterProfile)
-        }
+        // "Last confirmed" is deliberately NOT recorded here. A write's own
+        // read-back proves the value landed, but the delayed re-check and the
+        // post-write sweep can still contradict it; recording now would leave the
+        // settings screen advertising a target that later turned out wrong.
 
         // A completed write ends the flow; a read that ran only to produce the
         // pre-write snapshot hands over to the risk gate instead.
@@ -1228,12 +1311,6 @@ extension PrototypeCoordinator: BfgBleClient.Listener {
                 + "本次写入未确认成功；请核对当前参数后再尝试。")
             return
         }
-        if check.expectedProfile >= 0 {
-            backupStore.saveLastConfirmed(serial: result.serial,
-                                          profile: check.expectedProfile)
-        }
-        refreshBackupState(serial: result.serial)
-
         // Final check: sweep the module again and confirm that the only thing
         // that moved is the address that was written. Anything else changing is
         // the clearest early sign that a write reached further than intended.
@@ -1247,6 +1324,14 @@ extension PrototypeCoordinator: BfgBleClient.Listener {
                         operation: .dumpRegisters, dumpModules: [module])
             return
         }
+
+        // With no snapshot to sweep, the read-back is the only evidence there is,
+        // so that alone is what gets recorded as confirmed.
+        if check.expectedProfile >= 0 {
+            backupStore.saveLastConfirmed(serial: result.serial,
+                                          profile: check.expectedProfile)
+        }
+        refreshBackupState(serial: result.serial)
         showWriteSuccess(capacityPending: pending)
     }
 
@@ -1280,6 +1365,7 @@ extension PrototypeCoordinator: BfgBleClient.Listener {
         state["errorMessage"] = message
         state["busyMessage"] = NSNull()
         state["pairScanning"] = false
+        stopScanCountdown()
         pendingWrite = nil
         pendingUnverified = nil
         gate = nil

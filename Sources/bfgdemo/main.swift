@@ -350,6 +350,26 @@ do {
     }
 }
 
+// MARK: - 15. 未适配车型：读到车辆自报值（并仍拒绝写入）
+
+do {
+    // 档位字节 0x5F 的电压位非法，静态表无法解释它 —— 这正是「没适配」
+    // 的情形。车端仍然会报自己的容量，重复探测也能测出来；这两条路都不
+    // 依赖静态表。
+    let vehicle = makeVehicle { $0.profile = 0x5F }
+    run("未适配档位：读出车辆自报容量并标注未验证", vehicle: vehicle,
+        operation: .readOnly, store: pairedStore) { c, _ in
+        if let f = c.failure { return "失败：\(f)" }
+        guard let r = c.finished else { return "无结果" }
+        guard r.mode == .unsupported else { return "应判为未验证组合，实际 \(r.mode)" }
+        guard r.displayBeforeCapacity > 0 else { return "没有显示车辆自报的容量" }
+        guard r.capacityIsUnverified else { return "未标注为未验证" }
+        guard !r.writeSupported else { return "未验证组合绝不能允许写入" }
+        guard r.profileRaw == 0x5F else { return "档位读数不符：\(r.profileRaw)" }
+        return nil
+    }
+}
+
 // MARK: - 汇总
 
 print("\n" + String(repeating: "═", count: 62))
